@@ -12,7 +12,9 @@ if [[ -f .env ]]; then
 fi
 
 export PJRT_DEVICE=TPU
-export XLA_USE_BF16=1
+# NOTE: do NOT set XLA_USE_BF16=1 — it downcasts *all* fp32 ops (incl. softmax /
+# layernorm) to bf16 and produces NaNs at init for large vocabs. Use targeted
+# autocast inside the model instead if bf16 compute is desired.
 export WANDB_DISABLED="${WANDB_DISABLED:-true}"   # opt-in; default off for smoke
 
 # Tiny synthetic config: 50 steps, model SDM_SMALL.
