@@ -39,11 +39,15 @@ fi
 # shellcheck disable=SC1091
 source .venv/bin/activate
 
-# Install torch + torch_xla matching the TPU generation. The libtpu wheel
-# pulled by torch_xla picks runtime libs at import-time based on TPU_GEN.
+# Install torch + torch_xla matching the TPU generation.
+# - torch_xla 2.5 pinned to a libtpu-nightly version that is no longer on PyPI
+#   (resolution failure). 2.6+ moved to stable libtpu pulled via torch_xla[tpu]
+#   from the libtpu-releases index. v6e support requires >=2.6; we use 2.7
+#   which pins libtpu 0.0.11.1 (stable).
 uv pip install --upgrade pip
-uv pip install 'torch~=2.5.0' 'torch_xla[tpu]~=2.5.0' \
-    -f https://storage.googleapis.com/libtpu-releases/index.html
+uv pip install 'torch~=2.7.0' 'torch_xla[tpu]~=2.7.0' \
+    -f https://storage.googleapis.com/libtpu-releases/index.html \
+    -f https://storage.googleapis.com/libtpu-wheels/index.html
 
 # SDM + extras (skip teachers — those run on CPU/GPU host, not TPU).
 uv pip install -e '.[neucodec,tracking]'
@@ -52,9 +56,12 @@ uv pip install -e '.[neucodec,tracking]'
 python - <<'PY'
 import os
 os.environ.setdefault("PJRT_DEVICE", "TPU")
+import torch_xla
 import torch_xla.core.xla_model as xm
+import torch_xla.runtime as xr
+print("[bake] torch_xla:", torch_xla.__version__)
 print("[bake] xla device:", xm.xla_device())
-print("[bake] world size:", xm.xrt_world_size())
+print("[bake] world size:", xr.world_size())
 PY
 
 echo "[bake] done."
