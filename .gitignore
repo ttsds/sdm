@@ -1,0 +1,30 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# sdm artefacts
+checkpoints/
+runs/
+wandb/
+outputs/
+teacher_cache/
+*.ckpt
+*.safetensors
+*.bin
+
+# editor
+.idea/
+.vscode/
+*.swp
+.DS_Store

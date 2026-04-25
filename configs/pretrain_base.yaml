@@ -1,0 +1,46 @@
+# Pretrain config for sdm-base on TPU v4-32 / v4-64.
+#
+# fsq_vocab_size: confirmed empirically with `python scripts/probe_neucodec.py`
+# before running this. Re-run if Neuphonic ships a new codec.
+
+model:
+  fsq_vocab_size: 65536
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  intermediate_size: 3072
+  max_position_embeddings: 2048
+  position_buckets: 256
+
+data:
+  repo_id: neuphonic/emilia-yodas-english-neucodec
+  split: train
+  max_length: 2048
+  min_codes: 16
+  streaming: true
+  shuffle_buffer: 10000
+  seed: 0
+
+mlm:
+  mask_prob: 0.15
+  mask_replace_prob: 0.8
+  random_replace_prob: 0.1
+
+train:
+  batch_size: 16          # per-device; multiply by world_size for global
+  grad_accum: 1
+  lr: 3.0e-4
+  weight_decay: 0.01
+  warmup_steps: 4000
+  total_steps: 250000
+  log_every: 100
+  ckpt_every: 5000
+  ckpt_dir: gs://sdm-ckpts/pretrain_base
+  fsdp: true
+  resume_from_latest: true
+  seed: 0
+  wandb:
+    enabled: true
+    project: sdm
+    run_name: pretrain_base
+    tags: [pretrain, baseline]

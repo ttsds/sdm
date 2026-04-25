@@ -1,0 +1,48 @@
+# Generic-factor finetune: distill HuBERT layer 7, WavLM layer 11, wav2vec2 layer 8
+# (all 768-d at 50 Hz). Targets are pre-extracted via
+# `scripts/extract_teacher_targets.py --factor generic`.
+
+model:
+  fsq_vocab_size: 65536
+  hidden_size: 768
+  num_hidden_layers: 12
+  num_attention_heads: 12
+  intermediate_size: 3072
+  max_position_embeddings: 2048
+  position_buckets: 256
+
+data:
+  repo_id: neuphonic/emilia-yodas-english-neucodec
+  split: train
+  max_length: 2048
+  min_codes: 16
+
+heads:
+  - { name: hubert,   target_dim: 768, pooled: false, target_frame_rate_hz: 50.0 }
+  - { name: wavlm,    target_dim: 768, pooled: false, target_frame_rate_hz: 50.0 }
+  - { name: wav2vec2, target_dim: 768, pooled: false, target_frame_rate_hz: 50.0 }
+
+train:
+  cache_dir: gs://sdm-cache-euw4/teacher_cache/generic
+  pretrained_ckpt: gs://sdm-ckpts/pretrain_base/final.pt
+  layer_idx: -1
+  batch_size: 8
+  grad_accum: 1
+  lr: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 1000
+  total_steps: 50000
+  log_every: 50
+  ckpt_every: 2500
+  ckpt_dir: gs://sdm-ckpts/finetune_generic
+  resume_from_latest: true
+  seed: 0
+  teacher_weights:
+    hubert: 1.0
+    wavlm: 1.0
+    wav2vec2: 1.0
+  wandb:
+    enabled: true
+    project: sdm
+    run_name: finetune_generic
+    tags: [finetune, generic]

@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sdm"
+version = "0.0.1"
+description = "Unified speech representation model for TTSDS-style distributional evaluation"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Christoph Minixhofer", email = "christoph.minixhofer@gmail.com" },
+]
+dependencies = [
+  "torch",
+  "transformers>=4.40",
+  "datasets>=2.18",
+  "huggingface-hub",
+  "numpy",
+  "scipy",
+  "einops",
+  "omegaconf",
+  "pyyaml",
+  "soundfile",
+  "librosa",
+  "tqdm",
+  "rich",
+]
+
+[project.optional-dependencies]
+# Teacher feature extractors used to produce distillation targets.
+# Heavy and version-sensitive; install only on the host that builds the cache.
+teachers = [
+  "ttsds @ git+https://github.com/ttsds/ttsds",
+  "allosaurus",
+  "jiwer",
+  "openai-whisper==20250625",
+  "pesq",
+  "pyannote.audio",
+  "pyworld",
+  "silero-vad",
+  "wespeaker-unofficial",
+]
+# torch-xla wheels must match the torch version exactly; install separately
+# per the PyTorch/XLA release matrix.
+tpu = []
+neucodec = ["neucodec"]
+tracking = ["wandb"]
+dev = [
+  "pytest>=7",
+  "pytest-cov",
+  "ruff",
+  "mypy",
+  "pre-commit",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["sdm"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.uv]
+# `teachers` and `neucodec` pin incompatible numpy ranges; they are only ever
+# installed in disjoint environments (teacher target extraction host vs. main
+# training host), so declare them as a conflict instead of trying to jointly
+# resolve them.
+conflicts = [
+    [
+        { extra = "teachers" },
+        { extra = "neucodec" },
+    ],
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
+testpaths = ["tests"]
