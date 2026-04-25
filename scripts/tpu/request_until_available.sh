@@ -49,6 +49,11 @@ case "$MODE" in
     ;;
   --poll)
     echo "[poll] retrying $NAME ($ACCEL, $RUNTIME) in $ZONE (sleep ${SLEEP}s between attempts)"
+    ERRFILE="/tmp/sdm_provision_err.${NAME}"
+    # Errors we treat as transient and worth retrying. We grep the file directly
+    # rather than $(cat ...) because gcloud's stderr contains null bytes that
+    # bash strips during command substitution, which can produce an empty string.
+    RETRY_RE='no more capacity|Insufficient capacity|RESOURCE_EXHAUSTED|UNAVAILABLE|resourceExhausted|Stockout|currently unavailable|tenant project creation|"code": 8|"code": 10|HttpError|503|504|deadline exceeded|Internal error'
     attempt=0
     while true; do
         attempt=$((attempt + 1))
@@ -58,21 +63,18 @@ case "$MODE" in
                 --project="$PROJECT" \
                 --zone="$ZONE" \
                 --accelerator-type="$ACCEL" \
-                --version="$RUNTIME" 2>/tmp/sdm_provision_err; then
+                --version="$RUNTIME" 2>"$ERRFILE"; then
             echo "[poll] up after $attempt attempts."
             echo "  gcloud compute tpus tpu-vm ssh $NAME --project=$PROJECT --zone=$ZONE --worker=all"
             exit 0
         fi
-        err="$(cat /tmp/sdm_provision_err)"
-        echo "$err" | tail -5
-        # If it's a hard error (not capacity / not service availability), bail.
-        if echo "$err" | grep -qE 'no more capacity|RESOURCE_EXHAUSTED|UNAVAILABLE|resourceExhausted|Stockout|currently unavailable'; then
-            echo "[poll] capacity stockout; retrying"
-        elif echo "$err" | grep -qE 'tenant project creation'; then
-            echo "[poll] tenant-project creation hiccup; retrying"
+        tail -5 "$ERRFILE" 2>/dev/null || true
+        if grep -aqE "$RETRY_RE" "$ERRFILE" 2>/dev/null; then
+            echo "[poll] retryable error; retrying"
         else
-            echo "[poll] non-retryable error; aborting." >&2
-            exit 1
+            # Default to retry to be robust against null-byte stripping / unknown
+            # transient errors. The user can Ctrl-C if it's actually fatal.
+            echo "[poll] unrecognised error; retrying anyway (Ctrl-C to abort)"
         fi
         if (( SLEEP > 0 )); then sleep "$SLEEP"; fi
     done
