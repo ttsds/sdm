@@ -213,36 +213,33 @@ def make_wav2vec2_960h(device: str = "cpu") -> Teacher:
 
 @dataclass
 class _WeSpeaker:
-    """Sliding-window pyannote/wespeaker embeddings -> (n_windows, 256)."""
+    """WeSpeaker speaker embedding -> (256,) per utterance.
+
+    Uses the official `wespeaker` package (matches `wespeaker.cli.speaker`
+    behaviour: one forward pass over the whole utterance, no sliding window).
+    """
 
     name: str = "wespeaker"
-    window_duration: float = 1.0
-    window_step: float = 0.5
+    lang: str = "english"
     device: str = "cpu"
 
     def __post_init__(self) -> None:
         import librosa  # noqa: PLC0415
-        from pyannote.audio import Inference, Model  # noqa: PLC0415
+        import wespeaker  # noqa: PLC0415
 
         self._librosa = librosa
-        self._model = Model.from_pretrained("pyannote/wespeaker-voxceleb-resnet34-LM")
-        self._inference = Inference(
-            self._model,
-            window="sliding",
-            duration=self.window_duration,
-            step=self.window_step,
-        )
+        self._model = wespeaker.load_model(self.lang)
+        self._model.set_device(self.device)
 
     def __call__(self, wav: np.ndarray, sr: int) -> np.ndarray:
-        import soundfile as sf  # noqa: PLC0415
-        import tempfile  # noqa: PLC0415
+        import torch  # noqa: PLC0415
 
         if sr != 16000:
             wav = self._librosa.resample(wav, orig_sr=sr, target_sr=16000)
-        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
-            sf.write(f.name, wav, 16000)
-            sliding = self._inference(f.name)
-        return np.stack([np.asarray(x[1]) for x in sliding]).astype(np.float32)
+        # `extract_embedding_from_pcm` expects a 1xN int16/float tensor.
+        pcm = torch.tensor(wav, dtype=torch.float32).unsqueeze(0)
+        emb = self._model.extract_embedding_from_pcm(pcm, 16000)
+        return emb.detach().cpu().numpy().astype(np.float32)
 
 
 def make_wespeaker(device: str = "cpu") -> Teacher:
@@ -251,12 +248,10 @@ def make_wespeaker(device: str = "cpu") -> Teacher:
 
 @dataclass
 class _DVector:
-    """Sliding-window DVector embeddings -> (n_windows, 256). Uses the
+    """DVector speaker embedding -> (256,) per utterance. Uses the
     `dvector.pt` shipped inside the `ttsds` package (MIT)."""
 
     name: str = "dvector"
-    window_duration: float = 1.0
-    window_step: float = 0.5
     device: str = "cpu"
 
     def __post_init__(self) -> None:
@@ -273,26 +268,11 @@ class _DVector:
             self._dvector = torch.jit.load(str(dp / "dvector.pt")).to(self.device).eval()
 
     def __call__(self, wav: np.ndarray, sr: int) -> np.ndarray:
-        win = int(self.window_duration * sr)
-        hop = int(self.window_step * sr)
-        embs: list = []
-        for i in range(0, max(1, len(wav)), hop):
-            chunk = wav[i : i + win]
-            if len(chunk) <= win // 2:
-                continue
-            wav_t = self._torch.tensor(chunk).float().unsqueeze(0)
-            mel = self._wav2mel(wav_t, sr)
-            with self._torch.no_grad():
-                emb = self._dvector.embed_utterance(mel)
-            embs.append(emb.detach().cpu().numpy())
-        if not embs:
-            # Fallback: single embedding from whole utterance.
-            wav_t = self._torch.tensor(wav).float().unsqueeze(0)
-            mel = self._wav2mel(wav_t, sr)
-            with self._torch.no_grad():
-                emb = self._dvector.embed_utterance(mel)
-            embs = [emb.detach().cpu().numpy()]
-        return np.stack(embs).astype(np.float32)
+        wav_t = self._torch.tensor(wav).float().unsqueeze(0)
+        mel = self._wav2mel(wav_t, sr)
+        with self._torch.no_grad():
+            emb = self._dvector.embed_utterance(mel)
+        return emb.detach().cpu().numpy().astype(np.float32)
 
 
 def make_dvector(device: str = "cpu") -> Teacher:
@@ -382,63 +362,10 @@ def make_allosaurus(device: str = "cpu") -> Teacher:  # noqa: ARG001
     return _AllosaurusSR()
 
 
-@dataclass
-class _HubertTokenRate:
-    """Speaking rate from HuBERT-layer-7 KMeans run-length compression.
-
-    Requires a precomputed cluster-centres array. Drop one at
-    `<cache>/hubert_token_kmeans.npy` (shape `(K, 768)`) before extraction;
-    use TTSDS' own `HubertTokenSRBenchmark.create_clusters` to bootstrap one
-    from a held-out subset of the data.
-    """
-
-    name: str = "hubert_token_rate"
-    cluster_centers_path: str = "hubert_token_kmeans.npy"
-    hubert_model: str = "facebook/hubert-base-ls960"
-    layer: int = 7
-    device: str = "cpu"
-
-    def __post_init__(self) -> None:
-        import librosa  # noqa: PLC0415
-        import torch  # noqa: PLC0415
-        from sklearn.cluster import KMeans  # noqa: PLC0415
-        from transformers import HubertModel, Wav2Vec2Processor  # noqa: PLC0415
-
-        self._torch = torch
-        self._librosa = librosa
-        self._processor = Wav2Vec2Processor.from_pretrained("facebook/hubert-large-ls960-ft")
-        self._model = HubertModel.from_pretrained(self.hubert_model).to(self.device).eval()
-        centers = np.load(self.cluster_centers_path)
-        self._kmeans = KMeans(n_clusters=centers.shape[0], n_init=1)
-        self._kmeans.fit(np.zeros((centers.shape[0] + 1, centers.shape[1])))
-        self._kmeans.cluster_centers_ = centers
-
-    def __call__(self, wav: np.ndarray, sr: int) -> np.ndarray:
-        if sr != 16000:
-            wav = self._librosa.resample(wav, orig_sr=sr, target_sr=16000)
-        iv = self._processor(wav, return_tensors="pt", sampling_rate=16000).input_values
-        iv = iv.to(self.device)
-        with self._torch.no_grad():
-            feats = self._model(iv, output_hidden_states=True).hidden_states[self.layer]
-        feats = feats.squeeze(0).cpu().numpy()
-        clusters = self._kmeans.predict(feats)
-        # Run-length compression: count distinct token runs.
-        runs = 1 + int(np.sum(clusters[1:] != clusters[:-1]))
-        rate = runs / (len(wav) / 16000)
-        return np.array([rate], dtype=np.float32)
-
-
-def make_hubert_token_rate(
-    device: str = "cpu",
-    cluster_centers_path: str = "hubert_token_kmeans.npy",
-) -> Teacher:
-    return _HubertTokenRate(cluster_centers_path=cluster_centers_path, device=device)
-
-
 FACTOR_TO_TEACHERS: dict[str, list[str]] = {
     "generic": ["hubert", "wavlm", "wav2vec2", "xlsr", "mhubert"],
     "speaker": ["wespeaker", "dvector"],
-    "prosody": ["f0", "mpm", "allosaurus", "hubert_token_rate"],
+    "prosody": ["f0", "mpm", "allosaurus"],
     "intelligibility": ["whisper", "wav2vec2_960h"],
 }
 
@@ -456,7 +383,6 @@ _REGISTRY: dict[str, Callable[..., Teacher]] = {
     "allosaurus": make_allosaurus,
     "xlsr": make_xlsr,
     "mhubert": make_mhubert,
-    "hubert_token_rate": make_hubert_token_rate,
 }
 
 
@@ -517,7 +443,6 @@ __all__ = [
     "make_dvector",
     "make_f0",
     "make_hubert",
-    "make_hubert_token_rate",
     "make_mhubert",
     "make_mpm",
     "make_wav2vec2",
