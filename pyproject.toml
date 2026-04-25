@@ -36,7 +36,6 @@ teachers = [
   "jiwer",
   "openai-whisper==20250625",
   "pesq",
-  "pyannote.audio",
   "pyworld",
   "silero-vad",
   "wespeaker-unofficial",
