@@ -16,7 +16,7 @@ Pools (presets matching the TRC welcome email for project ml-edinburgh):
   v4-od            on-demand v4-8 in us-central2-b (32 chips OD)
   v4-spot          spot v4-8 in us-central2-b (32 chips spot)
   v5e-usc1         spot v5litepod-8 in us-central1-a (64 chips)
-  v5e-euw4         spot v5litepod-8 in us-central1-a (64 chips)  [in europe-west4-b]
+  v5e-euw4         spot v5litepod-8 in europe-west4-b (64 chips)
   v6e-use1         spot v6e-8 in us-east1-d (64 chips)
   v6e-euw4         spot v6e-8 in europe-west4-a (64 chips)
   all              every pool in parallel
