@@ -19,6 +19,7 @@ from sdm.data.teacher_dataset import (
     TeacherShardDataset,
     collate_teacher_batch,
 )
+from sdm.dotenv import load_dotenv
 from sdm.losses.wristband_gaussian import GaussianLossConfig, WristbandGaussianLoss
 from sdm.modeling.deberta_neucodec import SdmConfig, build_model
 from sdm.modeling.distillation_heads import (
@@ -204,6 +205,7 @@ def load_config(path: str | Path) -> FinetuneConfig:
 
 
 def main() -> None:
+    load_dotenv()
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True)
     args = p.parse_args()

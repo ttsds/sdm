@@ -21,6 +21,15 @@ CONFIG="${1:-configs/pretrain_base.yaml}"
 MAX_RETRIES="${SDM_MAX_RETRIES:-100}"
 RETRY_SLEEP="${SDM_RETRY_SLEEP:-30}"
 
+# Load secrets (WANDB_API_KEY, etc.) from a local .env if present. Variables
+# already exported by the environment win.
+if [[ -f .env ]]; then
+    set -a
+    # shellcheck disable=SC1091
+    source .env
+    set +a
+fi
+
 export PJRT_DEVICE=TPU
 export XLA_USE_BF16=1
 export PT_XLA_DEBUG_LEVEL=0

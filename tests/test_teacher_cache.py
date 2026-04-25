@@ -16,16 +16,16 @@ def test_factor_to_teachers_covers_four_factors():
     }
 
 
-def test_unported_teachers_raise_with_pointer():
-    with pytest.raises(NotImplementedError) as exc:
+def test_ported_teachers_raise_importerror_without_deps():
+    # Heavy deps (pyannote, allosaurus, ttsds, etc.) are not in the dev env;
+    # constructing the teacher should fail with ImportError, not NotImplementedError.
+    with pytest.raises((ImportError, FileNotFoundError, OSError)):
         teacher_cache.get_teacher("wespeaker")
-    msg = str(exc.value)
-    assert "ttsds" in msg.lower()
-    assert "wespeaker" in msg.lower()
 
 
-def test_get_factor_teachers_skips_unported(recwarn):
-    # All speaker teachers are still TODO -> we expect a warning and an empty dict.
+def test_get_factor_teachers_skips_when_deps_missing(recwarn):
+    # Speaker teachers require pyannote / ttsds; in the dev env they should be
+    # skipped with a warning, leaving an empty dict.
     teachers = teacher_cache.get_factor_teachers("speaker")
     assert teachers == {}
     assert any("Skipping teachers" in str(w.message) for w in recwarn.list)

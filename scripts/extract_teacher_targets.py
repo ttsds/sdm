@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from sdm.data.teacher_cache import decode_neucodec, get_factor_teachers
+from sdm.dotenv import load_dotenv
 
 
 def _shard_path(out: Path, shard_idx: int) -> Path:
@@ -44,6 +45,7 @@ def _flush(out: Path, shard_idx: int, buffer: dict[str, list]) -> None:
 
 
 def main() -> None:
+    load_dotenv()
     p = argparse.ArgumentParser()
     p.add_argument("--factor", required=True, choices=("generic", "speaker", "prosody", "intelligibility"))
     p.add_argument("--num-records", type=int, default=10_000)

@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 
 from sdm.data.neucodec_dataset import NeucodecConfig
+from sdm.dotenv import load_dotenv
 from sdm.losses.mlm import MLMConfig
 from sdm.losses.wristband_gaussian import GaussianLossConfig
 from sdm.modeling.deberta_neucodec import SdmConfig
@@ -29,6 +30,7 @@ def load_config(path: str | Path) -> TrainConfig:
 
 
 def main() -> None:
+    load_dotenv()
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True)
     p.add_argument("--synthetic", action="store_true")

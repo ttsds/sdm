@@ -19,6 +19,7 @@ data:
 
 heads:
   - { name: whisper, target_dim: 768, pooled: true }
+  - { name: wav2vec2_960h, target_dim: 768, pooled: true }
 
 train:
   cache_dir: gs://sdm-cache-euw4/teacher_cache/intelligibility
