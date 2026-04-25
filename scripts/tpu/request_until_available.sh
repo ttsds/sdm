@@ -22,7 +22,7 @@ ACCEL="${2:-v4-8}"
 ZONE="${3:-us-central2-b}"
 MODE="${4:---queued}"
 PROJECT="${SDM_GCP_PROJECT:-ml-edinburgh}"
-SLEEP="${SDM_PROVISION_SLEEP:-60}"
+SLEEP="${SDM_PROVISION_SLEEP:-0}"
 
 case "$ACCEL" in
     v4-*) RUNTIME="tpu-ubuntu2204-base" ;;
@@ -48,7 +48,7 @@ case "$MODE" in
     echo "  gcloud compute tpus tpu-vm ssh $NAME --project=$PROJECT --zone=$ZONE --worker=all"
     ;;
   --poll)
-    echo "[poll] retrying $NAME ($ACCEL, $RUNTIME) in $ZONE every ${SLEEP}s"
+    echo "[poll] retrying $NAME ($ACCEL, $RUNTIME) in $ZONE (sleep ${SLEEP}s between attempts)"
     attempt=0
     while true; do
         attempt=$((attempt + 1))
@@ -67,14 +67,14 @@ case "$MODE" in
         echo "$err" | tail -5
         # If it's a hard error (not capacity / not service availability), bail.
         if echo "$err" | grep -qE 'no more capacity|RESOURCE_EXHAUSTED|UNAVAILABLE|resourceExhausted|Stockout|currently unavailable'; then
-            echo "[poll] capacity stockout; sleeping ${SLEEP}s"
+            echo "[poll] capacity stockout; retrying"
         elif echo "$err" | grep -qE 'tenant project creation'; then
-            echo "[poll] tenant-project creation hiccup; sleeping ${SLEEP}s"
+            echo "[poll] tenant-project creation hiccup; retrying"
         else
             echo "[poll] non-retryable error; aborting." >&2
             exit 1
         fi
-        sleep "$SLEEP"
+        if (( SLEEP > 0 )); then sleep "$SLEEP"; fi
     done
     ;;
   *)
