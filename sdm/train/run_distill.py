@@ -162,6 +162,7 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
     if verbose and xla_utils.is_master():
         print(f"[verbose] experiment={cfg.experiment}")
         print(f"[verbose] device={device}")
+        print(f"[verbose] world_size={xla_utils.world_size()}")
         print(f"[verbose] backbone={cfg.backbone.__dict__}")
         print(f"[verbose] teacher={cfg.teacher.__dict__}")
         print(f"[verbose] data={cfg.data.__dict__}")
@@ -228,6 +229,7 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
     step = start_step
     optim.zero_grad(set_to_none=True)
     if verbose and xla_utils.is_master():
+        xla_utils.clear_metrics()
         print("[verbose] entering training loop; waiting for first batch ...")
     _t_prev = time.perf_counter()
     for batch in device_loader:
@@ -263,6 +265,16 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             xla_utils.mark_step()
         if verbose and xla_utils.is_master():
             t_optim = time.perf_counter() - t0
+            metrics = xla_utils.compile_metrics()
+            compile_msg = ""
+            if metrics:
+                compile_msg = (
+                    "  xla_compile "
+                    f"samples={metrics.get('CompileTimeSamples', 0)} "
+                    f"uncached={metrics.get('UncachedCompile', 0)} "
+                    f"cached={metrics.get('CachedCompile', 0)} "
+                    f"handles={metrics.get('CreateCompileHandles', 0)}"
+                )
             print(
                 f"[verbose] step {step:>6d}  "
                 f"data {t_data*1e3:7.1f}ms  "
@@ -270,6 +282,7 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
                 f"student {t_student*1e3:7.1f}ms  "
                 f"optim {t_optim*1e3:7.1f}ms  "
                 f"audio {tuple(audio.shape)}"
+                f"{compile_msg}"
             )
 
         if step % cfg.train.log_every == 0 and xla_utils.is_master():
