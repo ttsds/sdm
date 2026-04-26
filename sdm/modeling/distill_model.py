@@ -26,6 +26,8 @@ class BackboneConfig:
     model_id: str = DEFAULT_BACKBONE_MODEL_ID
     hidden_size: int = 768
     layer_idx: int = -1
+    apply_spec_augment: bool | None = False
+    layerdrop: float | None = 0.0
 
 
 class DistillModel(nn.Module):
@@ -85,6 +87,10 @@ class DistillModel(nn.Module):
 
 def build_backbone(cfg: BackboneConfig, *, target_dim: int | None = None) -> DistillModel:
     backbone = AutoModel.from_pretrained(cfg.model_id, **hf_token_kwargs())
+    if cfg.apply_spec_augment is not None and hasattr(backbone.config, "apply_spec_augment"):
+        backbone.config.apply_spec_augment = bool(cfg.apply_spec_augment)
+    if cfg.layerdrop is not None and hasattr(backbone.config, "layerdrop"):
+        backbone.config.layerdrop = float(cfg.layerdrop)
     model_hidden = int(backbone.config.hidden_size)
     if model_hidden != cfg.hidden_size:
         raise ValueError(

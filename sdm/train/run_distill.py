@@ -267,10 +267,8 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             for g in optim.param_groups:
                 g["lr"] = _lr_at(step // cfg.train.grad_accum, cfg.train)
             torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
-            xla_utils.reduce_gradients(optim)
-            optim.step()
+            xla_utils.optimizer_step(optim)
             optim.zero_grad(set_to_none=True)
-            xla_utils.mark_step()
         if verbose and xla_utils.is_master():
             t_optim = time.perf_counter() - t0
             metrics = xla_utils.compile_metrics()

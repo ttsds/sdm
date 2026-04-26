@@ -221,6 +221,15 @@ def reduce_gradients(optimizer: torch.optim.Optimizer) -> None:
     xm.reduce_gradients(optimizer)
 
 
+def optimizer_step(optimizer: torch.optim.Optimizer) -> None:
+    if not is_xla():
+        optimizer.step()
+        return
+    import torch_xla.core.xla_model as xm  # noqa: PLC0415
+
+    xm.optimizer_step(optimizer, barrier=True)
+
+
 def load_optimizer_state_if_compatible(
     optimizer: torch.optim.Optimizer,
     state: dict[str, Any],

@@ -88,6 +88,18 @@ def test_load_optimizer_state_if_compatible_rejects_stale_slot_shape():
     assert "exp_avg" in str(reason)
 
 
+def test_optimizer_step_updates_params_on_cpu():
+    model = torch.nn.Linear(4, 3)
+    optim = torch.optim.AdamW(model.parameters(), lr=0.1)
+    before = model.weight.detach().clone()
+    loss = model(torch.ones(2, 4)).sum()
+    loss.backward()
+
+    xla_utils.optimizer_step(optim)
+
+    assert not torch.equal(model.weight, before)
+
+
 def test_shard_module_fsdp_is_noop_off_xla():
     m = torch.nn.Linear(4, 4)
     out = xla_utils.shard_module_fsdp(m)

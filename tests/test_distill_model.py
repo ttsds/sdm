@@ -17,7 +17,12 @@ class _FakeBackbone(nn.Module):
         self.config = type(
             "FakeConfig",
             (),
-            {"hidden_size": hidden_size, "num_hidden_layers": num_hidden_layers},
+            {
+                "hidden_size": hidden_size,
+                "num_hidden_layers": num_hidden_layers,
+                "apply_spec_augment": True,
+                "layerdrop": 0.1,
+            },
         )()
         self.proj = nn.Linear(1, hidden_size)
 
@@ -78,3 +83,36 @@ def test_build_backbone_uses_hf_token(monkeypatch):
 
     assert captured["model_id"] == "private/backbone"
     assert captured["kwargs"]["token"] == "secret-token"
+
+
+def test_build_backbone_disables_stochastic_training_features(monkeypatch):
+    fake = _FakeBackbone(hidden_size=6)
+    monkeypatch.setattr(
+        "sdm.modeling.distill_model.AutoModel.from_pretrained",
+        lambda model_id, **kwargs: fake,
+    )
+
+    build_backbone(BackboneConfig(model_id="fake/mhubert", hidden_size=6))
+
+    assert fake.config.apply_spec_augment is False
+    assert fake.config.layerdrop == 0.0
+
+
+def test_build_backbone_can_keep_stochastic_training_features(monkeypatch):
+    fake = _FakeBackbone(hidden_size=6)
+    monkeypatch.setattr(
+        "sdm.modeling.distill_model.AutoModel.from_pretrained",
+        lambda model_id, **kwargs: fake,
+    )
+
+    build_backbone(
+        BackboneConfig(
+            model_id="fake/mhubert",
+            hidden_size=6,
+            apply_spec_augment=True,
+            layerdrop=0.2,
+        )
+    )
+
+    assert fake.config.apply_spec_augment is True
+    assert fake.config.layerdrop == 0.2
