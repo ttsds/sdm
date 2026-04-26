@@ -39,7 +39,7 @@ train:
   ckpt_every: 5000
   ckpt_dir: gs://sdm-ckpts/sdm-dvector
   resume_from_latest: true
-  fsdp: true
+  fsdp: false
   seed: 0
   wandb:
     enabled: true

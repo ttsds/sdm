@@ -38,7 +38,7 @@ train:
   ckpt_every: 2500
   ckpt_dir: gs://sdm-ckpts/sdm-pitch
   resume_from_latest: true
-  fsdp: true
+  fsdp: false
   seed: 0
   wandb:
     enabled: true
