@@ -163,24 +163,41 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tens
     return diff.pow(2).sum() / torch.clamp(denom, min=1.0)
 
 
-def _masked_mse_terms(
+def _masked_mse_ln_target(
     pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tensor
-) -> dict[str, torch.Tensor]:
-    """data2vec-style masked MSE: parameter-free LayerNorm over the feature
-    axis on both prediction and target before computing MSE.
+) -> torch.Tensor:
+    """Lean masked MSE used in the hot training path.
 
-    The target is expected to already be LayerNorm'd by the teacher (see
-    ``target_layernorm`` in ``HfSslConfig``); applying LN again here is a
-    no-op in expectation but makes the loss robust to the teacher flag and
-    matches the data2vec recipe (LN both sides, then MSE).
+    LayerNorm is applied to the target only (parameter-free, over the feature
+    axis); the prediction is left raw so that runaway student magnitudes
+    surface as a large loss instead of being silently normalized away.
     """
     pred_f = pred.float()
     target_f = target.float()
     d = pred_f.shape[-1]
-    pred_n = torch.nn.functional.layer_norm(pred_f, (d,))
     target_n = torch.nn.functional.layer_norm(target_f, (d,))
     mask = chunk_mask.to(pred_f.dtype).unsqueeze(-1)
-    raw_diff = pred_n - target_n
+    diff = (pred_f - target_n) * mask
+    denom = mask.sum() * d
+    return diff.pow(2).sum() / torch.clamp(denom, min=1.0)
+
+
+def _masked_mse_terms(
+    pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    """Diagnostic version of the masked MSE used only when ``--verbose``.
+
+    Applies parameter-free LayerNorm to the target only (matching the hot
+    path in :func:`_masked_mse_ln_target`) and returns every intermediate
+    tensor so the caller can print stats. The prediction is left raw on
+    purpose: normalizing it would mask student blow-ups.
+    """
+    pred_f = pred.float()
+    target_f = target.float()
+    d = pred_f.shape[-1]
+    target_n = torch.nn.functional.layer_norm(target_f, (d,))
+    mask = chunk_mask.to(pred_f.dtype).unsqueeze(-1)
+    raw_diff = pred_f - target_n
     masked_diff = raw_diff * mask
     sq = masked_diff.pow(2)
     mask_sum = mask.sum()
@@ -189,7 +206,6 @@ def _masked_mse_terms(
     return {
         "pred": pred_f,
         "target": target_f,
-        "pred_n": pred_n,
         "target_n": target_n,
         "raw_diff": raw_diff,
         "masked_diff": masked_diff,
@@ -322,8 +338,12 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             t0 = time.perf_counter()
 
         pred = student(audio)
-        loss_terms = _masked_mse_terms(pred, target, chunk_mask)
-        loss = loss_terms["loss"] / cfg.train.grad_accum
+        if verbose and xla_utils.is_master():
+            loss_terms = _masked_mse_terms(pred, target, chunk_mask)
+            loss = loss_terms["loss"] / cfg.train.grad_accum
+        else:
+            loss_terms = None
+            loss = _masked_mse_ln_target(pred, target, chunk_mask) / cfg.train.grad_accum
         loss.backward()
         if verbose and xla_utils.is_master():
             xla_utils.mark_step()
@@ -370,7 +390,7 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
 
         if step % cfg.train.log_every == 0 and xla_utils.is_master():
             loss_val = float(loss.detach()) * cfg.train.grad_accum
-            if verbose:
+            if verbose and loss_terms is not None:
                 print(f"[verbose] step {step} tensor diagnostics:")
                 print("[verbose] " + _stats_for_debug("audio", audio))
                 print("[verbose] " + _stats_for_debug("teacher_audio", teacher_audio))
@@ -378,7 +398,6 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
                 print("[verbose] " + _stats_for_debug("target", loss_terms["target"]))
                 print("[verbose] " + _stats_for_debug("pred", loss_terms["pred"]))
                 print("[verbose] " + _stats_for_debug("target_n", loss_terms["target_n"]))
-                print("[verbose] " + _stats_for_debug("pred_n", loss_terms["pred_n"]))
                 print("[verbose] " + _stats_for_debug("raw_diff", loss_terms["raw_diff"]))
                 print("[verbose] " + _stats_for_debug("masked_diff", loss_terms["masked_diff"]))
                 print("[verbose] " + _stats_for_debug("sq", loss_terms["sq"]))
