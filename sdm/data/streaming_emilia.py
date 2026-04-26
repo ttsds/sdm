@@ -13,13 +13,15 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
+from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
-from sdm.dotenv import hf_token_kwargs
+from sdm.dotenv import hf_token, hf_token_kwargs
 
 
 @dataclass
@@ -102,9 +104,57 @@ def _open_emilia_stream(cfg: EmiliaConfig) -> Iterable[dict[str, Any]]:
     from datasets import load_dataset  # type: ignore
 
     ds = load_dataset(cfg.repo_id, split=cfg.split, streaming=cfg.streaming, **hf_token_kwargs())
+    ds = _cast_audio_to_plain_dict(ds)
     if cfg.streaming and cfg.shuffle_buffer > 0:
         ds = ds.shuffle(seed=cfg.seed, buffer_size=cfg.shuffle_buffer)
     return ds
+
+
+def _cast_audio_to_plain_dict(ds: Any) -> Any:
+    """Keep HF Audio columns as raw dicts so TorchCodec is not needed on TPUs."""
+
+    features = getattr(ds, "features", None)
+    if not features or "audio" not in features:
+        return ds
+
+    from datasets import Audio, Features, Sequence, Value  # type: ignore
+
+    if not isinstance(features["audio"], Audio):
+        return ds
+
+    plain_features = dict(features)
+    plain_features["audio"] = {
+        "array": Sequence(Value("float32")),
+        "sampling_rate": Value("int64"),
+        "path": Value("string"),
+        "bytes": Value("binary"),
+    }
+    return ds.cast(Features(plain_features))
+
+
+def _read_audio_file(path: str | Path) -> tuple[np.ndarray, int]:
+    import soundfile as sf  # type: ignore
+
+    array, sample_rate = sf.read(path, dtype="float32", always_2d=False)
+    return np.asarray(array, dtype=np.float32), int(sample_rate)
+
+
+def _read_audio_bytes(payload: bytes) -> tuple[np.ndarray, int]:
+    import soundfile as sf  # type: ignore
+
+    array, sample_rate = sf.read(BytesIO(payload), dtype="float32", always_2d=False)
+    return np.asarray(array, dtype=np.float32), int(sample_rate)
+
+
+def _read_audio_path(path: str) -> tuple[np.ndarray, int]:
+    if "://" not in path and "::" not in path:
+        return _read_audio_file(path)
+
+    from datasets.download.download_config import DownloadConfig  # type: ignore
+    from datasets.utils.file_utils import xopen  # type: ignore
+
+    with xopen(path, "rb", download_config=DownloadConfig(token=hf_token())) as handle:
+        return _read_audio_bytes(handle.read())
 
 
 def _extract_audio(record: dict[str, Any]) -> tuple[np.ndarray, int]:
@@ -112,8 +162,15 @@ def _extract_audio(record: dict[str, Any]) -> tuple[np.ndarray, int]:
     if audio is None:
         raise KeyError(f"record missing 'audio' field; keys={list(record)}")
     if isinstance(audio, dict):
-        array = np.asarray(audio["array"])
-        sr = int(audio["sampling_rate"])
+        if audio.get("array") is not None:
+            array = np.asarray(audio["array"])
+            sr = int(audio["sampling_rate"])
+            return array.astype(np.float32, copy=False), sr
+        if audio.get("bytes") is not None:
+            return _read_audio_bytes(audio["bytes"])
+        if audio.get("path") is not None:
+            return _read_audio_path(str(audio["path"]))
+        raise ValueError(f"audio dict has no array, bytes, or path: keys={list(audio)}")
     else:  # tuple/list fallback
         array, sr = audio
         array = np.asarray(array)
@@ -207,6 +264,7 @@ def collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
 __all__ = [
     "EmiliaConfig",
     "StreamingEmiliaDataset",
+    "_cast_audio_to_plain_dict",
     "chunk_audio",
     "collate",
     "iter_chunks",

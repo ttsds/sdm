@@ -6,10 +6,12 @@ import torch
 from sdm.data.streaming_emilia import (
     EmiliaConfig,
     StreamingEmiliaDataset,
+    _cast_audio_to_plain_dict,
+    _extract_audio,
+    _open_emilia_stream,
     chunk_audio,
     collate,
     iter_chunks,
-    _open_emilia_stream,
     samples_per_chunk,
 )
 
@@ -97,6 +99,8 @@ def test_open_emilia_stream_passes_hf_token(monkeypatch):
     captured = {}
 
     class _FakeStream(list):
+        features = {}
+
         def shuffle(self, *, seed, buffer_size):
             captured["shuffle"] = (seed, buffer_size)
             return self
@@ -117,3 +121,33 @@ def test_open_emilia_stream_passes_hf_token(monkeypatch):
     assert captured["args"] == ("private/repo",)
     assert captured["kwargs"]["token"] == "secret-token"
     assert captured["shuffle"] == (7, 4)
+
+
+def test_cast_audio_to_plain_dict_avoids_audio_feature():
+    from datasets import Audio, Features, Value
+
+    class _FakeStream(list):
+        features = Features({"audio": Audio(), "id": Value("string")})
+
+        def cast(self, features):
+            self.features = features
+            return self
+
+    ds = _cast_audio_to_plain_dict(_FakeStream())
+
+    assert not isinstance(ds.features["audio"], Audio)
+    assert set(ds.features["audio"]) == {"array", "sampling_rate", "path", "bytes"}
+
+
+def test_extract_audio_reads_embedded_wav_bytes():
+    import soundfile as sf
+    from io import BytesIO
+
+    buffer = BytesIO()
+    sf.write(buffer, np.linspace(-0.5, 0.5, 8, dtype=np.float32), 8000, format="WAV")
+
+    array, sample_rate = _extract_audio({"audio": {"bytes": buffer.getvalue(), "path": None}})
+
+    assert sample_rate == 8000
+    assert array.shape == (8,)
+    assert array.dtype == np.float32
