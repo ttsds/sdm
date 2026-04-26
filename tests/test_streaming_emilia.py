@@ -9,6 +9,7 @@ from sdm.data.streaming_emilia import (
     _cast_audio_to_plain_dict,
     _extract_audio,
     _open_emilia_stream,
+    _sanitize_waveform,
     chunk_audio,
     collate,
     iter_chunks,
@@ -64,6 +65,17 @@ def test_iter_chunks_emits_fixed_shape():
         assert item["n_chunks"] == 3
         assert item["language"] == "en"
         assert item["id"].startswith("utt-")
+
+
+def test_sanitize_waveform_replaces_nonfinite_and_rescales_large_values():
+    waveform = np.array([0.0, np.nan, np.inf, -np.inf, 1000.0, -500.0], dtype=np.float32)
+
+    out = _sanitize_waveform(waveform)
+
+    assert out.dtype == np.float32
+    assert np.isfinite(out).all()
+    assert np.max(np.abs(out)) <= 1.0
+    assert out[1] == 0.0
 
 
 def test_iter_chunks_take_limits_records():

@@ -148,10 +148,25 @@ def _save(model, optim, step: int, ckpt_dir: str, *, also_latest: bool = True) -
 
 def _masked_mse(pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tensor) -> torch.Tensor:
     # pred, target: (B, N, D); chunk_mask: (B, N) bool
+    pred = pred.float()
+    target = target.float()
     mask = chunk_mask.to(pred.dtype).unsqueeze(-1)
     diff = (pred - target) * mask
     denom = mask.sum() * pred.shape[-1]
     return diff.pow(2).sum() / torch.clamp(denom, min=1.0)
+
+
+def _stats_for_debug(name: str, tensor: torch.Tensor) -> str:
+    value = tensor.detach().float()
+    finite = torch.isfinite(value)
+    finite_count = int(finite.sum().cpu().item())
+    total = value.numel()
+    clean = torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
+    return (
+        f"{name}: shape={tuple(value.shape)} finite={finite_count}/{total} "
+        f"min={float(clean.min().cpu()):.4g} max={float(clean.max().cpu()):.4g} "
+        f"mean={float(clean.mean().cpu()):.4g}"
+    )
 
 
 def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
@@ -260,13 +275,21 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
         loss.backward()
         if verbose and xla_utils.is_master():
             xla_utils.mark_step()
+            if not bool(torch.isfinite(loss.detach()).cpu().item()):
+                print("[verbose] nonfinite loss detected before optimizer step")
+                print("[verbose] " + _stats_for_debug("audio", audio))
+                print("[verbose] " + _stats_for_debug("chunk_mask", chunk_mask))
+                print("[verbose] " + _stats_for_debug("target", target))
+                print("[verbose] " + _stats_for_debug("pred", pred))
+                print("[verbose] " + _stats_for_debug("loss", loss))
+                raise FloatingPointError("nonfinite distillation loss")
             t_student = time.perf_counter() - t0
             t0 = time.perf_counter()
 
         if (step + 1) % cfg.train.grad_accum == 0:
             for g in optim.param_groups:
                 g["lr"] = _lr_at(step // cfg.train.grad_accum, cfg.train)
-            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0, error_if_nonfinite=True)
             xla_utils.optimizer_step(optim)
             optim.zero_grad(set_to_none=True)
         if verbose and xla_utils.is_master():

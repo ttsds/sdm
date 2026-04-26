@@ -63,6 +63,19 @@ def _to_mono(array: np.ndarray) -> np.ndarray:
     raise ValueError(f"unexpected audio rank {array.ndim}")
 
 
+def _sanitize_waveform(array: np.ndarray) -> np.ndarray:
+    array = np.asarray(array, dtype=np.float32)
+    if array.size == 0:
+        return array
+    array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+    max_abs = float(np.max(np.abs(array)))
+    if max_abs > 2.0:
+        array = array / max_abs
+    elif max_abs > 1.0:
+        array = np.clip(array, -1.0, 1.0)
+    return array.astype(np.float32, copy=False)
+
+
 def chunk_audio(
     waveform: np.ndarray,
     *,
@@ -363,6 +376,7 @@ def iter_chunks(
         array, sr = _extract_audio(record)
         array = _to_mono(array)
         array = _resample_if_needed(array, sr, cfg.sample_rate)
+        array = _sanitize_waveform(array)
         audio, mask, n = chunk_audio(array, samples_per_chunk=spc, max_chunks=cfg.max_chunks)
         yield {
             "audio": audio,

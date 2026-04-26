@@ -42,6 +42,17 @@ def test_masked_mse_zeroes_out_padding():
     assert abs(loss - 4.0) < 1e-6
 
 
+def test_masked_mse_uses_float32_for_bfloat16_inputs():
+    pred = torch.tensor([[[1.0, 3.0]]], dtype=torch.bfloat16)
+    target = torch.tensor([[[0.0, 1.0]]], dtype=torch.bfloat16)
+    mask = torch.tensor([[True]])
+
+    loss = _masked_mse(pred, target, mask)
+
+    assert loss.dtype == torch.float32
+    assert torch.isclose(loss, torch.tensor(2.5))
+
+
 class _FakeBackbone(nn.Module):
     def __init__(self, hidden_size: int = 6):
         super().__init__()
