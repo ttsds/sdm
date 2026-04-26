@@ -248,6 +248,10 @@ def _parse() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse()
+    xla_utils.launch(_main_worker, args=(args,))
+
+
+def _main_worker(_index: int, args: argparse.Namespace) -> None:
     model_cfg = SDM_SMALL if args.size == "small" else SDM_BASE
     model_cfg = SdmConfig(
         fsq_vocab_size=args.fsq_vocab_size,

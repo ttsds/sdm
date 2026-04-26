@@ -204,12 +204,20 @@ def load_config(path: str | Path) -> FinetuneConfig:
     return FinetuneConfig(model=model, data=data, head_specs=head_specs, **train_kwargs)
 
 
-def main() -> None:
-    load_dotenv()
+def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True)
-    args = p.parse_args()
+    return p.parse_args()
+
+
+def _main_worker(_index: int, args: argparse.Namespace) -> None:
     train(load_config(args.config))
+
+
+def main() -> None:
+    load_dotenv()
+    args = _parse_args()
+    xla_utils.launch(_main_worker, args=(args,))
 
 
 if __name__ == "__main__":

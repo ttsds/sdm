@@ -6,6 +6,10 @@ import pytest
 from sdm.train import xla_utils
 
 
+def _worker(index, value):
+    return index, value
+
+
 def test_helpers_on_cpu():
     assert xla_utils.world_size() == 1
     assert xla_utils.global_ordinal() == 0
@@ -32,6 +36,22 @@ def test_force_cpu_keeps_explicit_local_fallback(monkeypatch):
 
     assert xla_utils.xla_required() is False
     assert xla_utils.get_device().type in {"cpu", "cuda"}
+
+
+def test_launch_runs_inline_when_xla_not_required(monkeypatch):
+    monkeypatch.delenv("PJRT_DEVICE", raising=False)
+    monkeypatch.delenv("SDM_REQUIRE_XLA", raising=False)
+    monkeypatch.delenv("SDM_XLA_LAUNCHED", raising=False)
+
+    assert xla_utils.launch(_worker, args=("ok",)) == (0, "ok")
+
+
+def test_shard_module_fsdp_requires_multi_process_xla(monkeypatch):
+    monkeypatch.setattr(xla_utils, "is_xla", lambda: True)
+    monkeypatch.setattr(xla_utils, "world_size", lambda: 1)
+
+    with pytest.raises(RuntimeError, match="multi-process XLA launch"):
+        xla_utils.shard_module_fsdp(torch.nn.Linear(4, 4))
 
 
 def test_shard_module_fsdp_is_noop_off_xla():

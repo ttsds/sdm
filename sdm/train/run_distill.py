@@ -323,8 +323,7 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
     wandb_utils.finish()
 
 
-def main() -> None:
-    load_dotenv()
+def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--dry-run", action="store_true", help="Load config and check imports only")
@@ -334,8 +333,10 @@ def main() -> None:
         action="store_true",
         help="Print per-step phase timings (data/teacher/student/optim) and startup info",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def _run(args: argparse.Namespace) -> None:
     cfg = load_config(args.config)
     if args.dry_run:
         import sdm.data.streaming_emilia  # noqa: F401
@@ -345,6 +346,19 @@ def main() -> None:
         return
 
     train(cfg, verbose=args.verbose)
+
+
+def _main_worker(_index: int, args: argparse.Namespace) -> None:
+    _run(args)
+
+
+def main() -> None:
+    load_dotenv()
+    args = _parse_args()
+    if args.dry_run:
+        _run(args)
+        return
+    xla_utils.launch(_main_worker, args=(args,))
 
 
 if __name__ == "__main__":

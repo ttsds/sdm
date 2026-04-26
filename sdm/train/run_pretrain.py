@@ -12,7 +12,7 @@ from sdm.dotenv import load_dotenv
 from sdm.losses.mlm import MLMConfig
 from sdm.losses.wristband_gaussian import GaussianLossConfig
 from sdm.modeling.deberta_neucodec import SdmConfig
-from sdm.train import wandb_utils
+from sdm.train import wandb_utils, xla_utils
 from sdm.train.pretrain import TrainConfig, train
 
 
@@ -29,8 +29,7 @@ def load_config(path: str | Path) -> TrainConfig:
     return TrainConfig(model=model, data=data, mlm=mlm, **train_kwargs)
 
 
-def main() -> None:
-    load_dotenv()
+def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True)
     p.add_argument("--synthetic", action="store_true")
@@ -40,7 +39,10 @@ def main() -> None:
         action="store_true",
         help="Print loaded config before starting training",
     )
-    args = p.parse_args()
+    return p.parse_args()
+
+
+def _run(args: argparse.Namespace) -> None:
     cfg = load_config(args.config)
     if args.verbose:
         print(f"[verbose] config={args.config} synthetic={args.synthetic}")
@@ -50,6 +52,16 @@ def main() -> None:
         train_dict = {k: v for k, v in cfg.__dict__.items() if k not in ("model", "data", "mlm")}
         print(f"[verbose] train={train_dict}")
     train(cfg, synthetic=args.synthetic)
+
+
+def _main_worker(_index: int, args: argparse.Namespace) -> None:
+    _run(args)
+
+
+def main() -> None:
+    load_dotenv()
+    args = _parse_args()
+    xla_utils.launch(_main_worker, args=(args,))
 
 
 if __name__ == "__main__":

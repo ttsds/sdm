@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 import torch
@@ -86,6 +86,29 @@ def get_device(*, require_xla: bool | None = None) -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
+
+
+def launch(fn: Callable[..., Any], args: tuple[Any, ...] = ()) -> Any:
+    """Launch an entrypoint across local XLA devices when TPU/XLA is requested.
+
+    `fn` must accept the XLA worker index as its first positional argument.
+    """
+    if not xla_required() or _truthy_env("SDM_XLA_LAUNCHED"):
+        return fn(0, *args)
+
+    try:
+        torch_xla = _import_torch_xla()
+    except ImportError as exc:
+        raise _xla_unavailable_error() from exc
+
+    os.environ["SDM_XLA_LAUNCHED"] = "1"
+    launcher = getattr(torch_xla, "launch", None)
+    if launcher is not None:
+        return launcher(fn, args=args)
+
+    import torch_xla.distributed.xla_multiprocessing as xmp  # noqa: PLC0415
+
+    return xmp.spawn(fn, args=args)
 
 
 def mark_step() -> None:
@@ -179,6 +202,12 @@ def shard_module_fsdp(module: nn.Module) -> nn.Module:
     """Wrap a module with FSDP-via-XLA. No-op on non-XLA backends."""
     if not is_xla():
         return module
+    if world_size() < 2:
+        raise RuntimeError(
+            "XLA FSDP requires a multi-process XLA launch, but world_size() is 1. "
+            "Run through the module entrypoint so torch_xla.launch can spawn workers, "
+            "or set fsdp: false for a single-process smoke run."
+        )
     from torch_xla.distributed.fsdp import XlaFullyShardedDataParallel as FSDP  # noqa: PLC0415
 
     return FSDP(module)
