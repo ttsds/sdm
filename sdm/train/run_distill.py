@@ -156,7 +156,9 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tens
 
 def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
     torch.manual_seed(cfg.train.seed)
-    device = xla_utils.get_device()
+    device = xla_utils.get_device(
+        require_xla=xla_utils.xla_required() or cfg.train.fsdp
+    )
     stop = preempt.install()
 
     if verbose and xla_utils.is_master():

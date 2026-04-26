@@ -1,6 +1,6 @@
 """Thin wrappers around torch_xla so the rest of the codebase can stay
-device-agnostic. Every helper falls back to the equivalent CPU/GPU op when
-torch_xla is not installed, so unit tests run in any environment.
+device-agnostic. Helpers fall back to CPU/GPU only when XLA was not requested;
+TPU runs fail loudly if torch_xla is unavailable.
 """
 
 from __future__ import annotations
@@ -15,16 +15,70 @@ from torch import nn
 
 from sdm.train import io as ckpt_io
 
+_TPU_ENV_VARS = (
+    "TPU_NAME",
+    "TPU_WORKER_ID",
+    "TPU_ACCELERATOR_TYPE",
+    "CLOUD_TPU_TASK_ID",
+    "TPU_PROCESS_BOUNDS",
+    "TPU_VISIBLE_DEVICES",
+    "XRT_TPU_CONFIG",
+)
+
+
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def xla_required() -> bool:
+    """Return whether this process should refuse non-XLA fallback."""
+    if _truthy_env("SDM_FORCE_CPU"):
+        return False
+    if _truthy_env("SDM_REQUIRE_XLA"):
+        return True
+    if os.environ.get("PJRT_DEVICE", "").strip().upper() == "TPU":
+        return True
+    if any(os.environ.get(name) for name in _TPU_ENV_VARS):
+        return True
+    return os.path.exists("/dev/accel0")
+
+
+def _import_torch_xla():
+    import torch_xla  # noqa: PLC0415
+
+    return torch_xla
+
+
+def _xla_unavailable_error() -> RuntimeError:
+    return RuntimeError(
+        "XLA/TPU training was requested, but torch_xla could not be imported. "
+        "Refusing to fall back to CPU/CUDA. Fix the torch/torch_xla/libtpu install, "
+        "or set SDM_FORCE_CPU=1 only for an intentional local CPU run."
+    )
+
 
 def is_xla() -> bool:
-    try:
-        import torch_xla  # noqa: F401, PLC0415
-    except ImportError:
+    if _truthy_env("SDM_FORCE_CPU"):
         return False
-    return os.environ.get("SDM_FORCE_CPU") != "1"
+    try:
+        _import_torch_xla()
+    except ImportError as exc:
+        if xla_required():
+            raise _xla_unavailable_error() from exc
+        return False
+    return True
 
 
-def get_device() -> torch.device:
+def get_device(*, require_xla: bool | None = None) -> torch.device:
+    if require_xla is None:
+        require_xla = xla_required()
+    if require_xla:
+        try:
+            import torch_xla.core.xla_model as xm  # noqa: PLC0415
+        except ImportError as exc:
+            raise _xla_unavailable_error() from exc
+
+        return xm.xla_device()
     if is_xla():
         import torch_xla.core.xla_model as xm  # noqa: PLC0415
 

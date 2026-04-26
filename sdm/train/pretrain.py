@@ -94,7 +94,9 @@ def _save(model, optim, step: int, ckpt_dir: str, *, also_latest: bool = True) -
 
 def train(cfg: TrainConfig, *, synthetic: bool = False) -> None:
     torch.manual_seed(cfg.seed)
-    device = xla_utils.get_device()
+    device = xla_utils.get_device(
+        require_xla=xla_utils.xla_required() or (cfg.fsdp and not synthetic)
+    )
     stop = preempt.install()
 
     model = build_model(cfg.model).to(device)

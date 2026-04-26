@@ -64,7 +64,7 @@ def _lr_at(step: int, cfg: FinetuneConfig) -> float:
 
 def train(cfg: FinetuneConfig) -> None:
     torch.manual_seed(cfg.seed)
-    device = xla_utils.get_device()
+    device = xla_utils.get_device(require_xla=xla_utils.xla_required())
     stop = preempt.install()
 
     backbone = build_model(cfg.model)
