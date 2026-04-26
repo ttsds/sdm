@@ -105,13 +105,16 @@ def test_state_dict_is_finite_accepts_finite_tensor():
     assert reason is None
 
 
-def test_sanitize_gradients_replaces_nonfinite_values():
-    param = torch.nn.Parameter(torch.ones(4))
-    param.grad = torch.tensor([1.0, float("nan"), float("inf"), -float("inf")])
+def test_optimizer_step_updates_params_on_cpu():
+    model = torch.nn.Linear(4, 3)
+    optim = torch.optim.AdamW(model.parameters(), lr=0.1)
+    before = model.weight.detach().clone()
+    loss = model(torch.ones(2, 4)).sum()
+    loss.backward()
 
-    xla_utils.sanitize_gradients([param])
+    xla_utils.optimizer_step(optim)
 
-    assert torch.equal(param.grad, torch.tensor([1.0, 0.0, 0.0, 0.0]))
+    assert not torch.equal(model.weight, before)
 
 
 def test_shard_module_fsdp_is_noop_off_xla():
