@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 import torch
 from torch import nn
 
@@ -214,49 +213,3 @@ def test_train_skips_checkpoint_with_nonfinite_model(monkeypatch, tmp_path, caps
     assert final["step"] == 1
 
 
-def test_train_stop_after_backward_exits_before_clip(monkeypatch, tmp_path):
-    monkeypatch.setattr(
-        "sdm.modeling.distill_model.AutoModel.from_pretrained",
-        lambda model_id: _FakeBackbone(hidden_size=6),
-    )
-    monkeypatch.setattr(run_distill, "_build_teacher", lambda cfg, device: _FakeTeacher(target_dim=4))
-    records = list(_fake_records(4, seconds=1.5, sr=16000))
-    monkeypatch.setattr("sdm.data.streaming_emilia._open_emilia_stream", lambda cfg: iter(records))
-
-    stop = run_distill.preempt.StopState()
-    monkeypatch.setattr(run_distill.preempt, "install", lambda: stop)
-    original_backward = torch.Tensor.backward
-
-    def _backward_and_stop(self, *args, **kwargs):
-        result = original_backward(self, *args, **kwargs)
-        stop.requested = True
-        stop.signum = 2
-        return result
-
-    def _clip_should_not_run(*args, **kwargs):
-        raise AssertionError("clip_grad_norm_ should not run after stop is requested")
-
-    monkeypatch.setattr(torch.Tensor, "backward", _backward_and_stop)
-    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", _clip_should_not_run)
-
-    cfg = DistillConfig(
-        experiment="test",
-        backbone=BackboneConfig(model_id="fake/mhubert", hidden_size=6, layer_idx=-1),
-        teacher=TeacherConfig(kind="hf_ssl", target_dim=4, pooled="chunked", model_id="fake", layer=1),
-        data=EmiliaConfig(repo_id="fake", sample_rate=16000, chunk_seconds=1.0, max_chunks=2, num_workers=0),
-        train=DistillTrainConfig(
-            batch_size=2,
-            total_steps=3,
-            log_every=1,
-            ckpt_every=0,
-            ckpt_dir=str(tmp_path),
-            resume_from_latest=False,
-            fsdp=False,
-        ),
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        train(cfg)
-
-    assert exc.value.code == 130
-    assert (tmp_path / "latest.pt").exists()

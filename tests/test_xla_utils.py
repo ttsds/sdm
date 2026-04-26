@@ -105,6 +105,15 @@ def test_state_dict_is_finite_accepts_finite_tensor():
     assert reason is None
 
 
+def test_sanitize_gradients_replaces_nonfinite_values():
+    param = torch.nn.Parameter(torch.ones(4))
+    param.grad = torch.tensor([1.0, float("nan"), float("inf"), -float("inf")])
+
+    xla_utils.sanitize_gradients([param])
+
+    assert torch.equal(param.grad, torch.tensor([1.0, 0.0, 0.0, 0.0]))
+
+
 def test_shard_module_fsdp_is_noop_off_xla():
     m = torch.nn.Linear(4, 4)
     out = xla_utils.shard_module_fsdp(m)

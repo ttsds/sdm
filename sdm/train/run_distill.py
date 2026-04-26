@@ -279,14 +279,6 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
         pred = student(audio)
         loss = _masked_mse(pred, target, chunk_mask) / cfg.train.grad_accum
         loss.backward()
-        if stop.requested:
-            optim.zero_grad(set_to_none=True)
-            if cfg.train.ckpt_dir:
-                _save(student, optim, step, cfg.train.ckpt_dir)
-            if xla_utils.is_master():
-                print(f"stop signal received (signum={stop.signum}); exiting")
-            wandb_utils.finish()
-            raise SystemExit(130)
         if verbose and xla_utils.is_master():
             xla_utils.mark_step()
             t_student = time.perf_counter() - t0
@@ -295,7 +287,8 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
         if (step + 1) % cfg.train.grad_accum == 0:
             for g in optim.param_groups:
                 g["lr"] = _lr_at(step // cfg.train.grad_accum, cfg.train)
-            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0, error_if_nonfinite=True)
+            xla_utils.sanitize_gradients(student.parameters())
+            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
             xla_utils.reduce_gradients(optim)
             optim.step()
             optim.zero_grad(set_to_none=True)

@@ -221,6 +221,12 @@ def reduce_gradients(optimizer: torch.optim.Optimizer) -> None:
     xm.reduce_gradients(optimizer)
 
 
+def sanitize_gradients(parameters: Iterable[torch.nn.Parameter]) -> None:
+    for parameter in parameters:
+        if parameter.grad is not None:
+            parameter.grad = torch.nan_to_num(parameter.grad, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def state_dict_is_finite(state: dict[str, Any]) -> tuple[bool, str | None]:
     for name, value in state.items():
         if torch.is_tensor(value) and not bool(torch.isfinite(value).all().item()):

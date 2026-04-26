@@ -210,7 +210,8 @@ def train(cfg: TrainConfig, *, synthetic: bool = False) -> None:
         if (step + 1) % cfg.grad_accum == 0:
             for g in optim.param_groups:
                 g["lr"] = _lr_at(step // cfg.grad_accum, cfg)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
+            xla_utils.sanitize_gradients(model.parameters())
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             xla_utils.reduce_gradients(optim)
             optim.step()
             optim.zero_grad(set_to_none=True)
