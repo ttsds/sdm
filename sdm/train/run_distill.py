@@ -281,14 +281,6 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
         loss.backward()
         if verbose and xla_utils.is_master():
             xla_utils.mark_step()
-            if not bool(torch.isfinite(loss.detach()).cpu().item()):
-                print("[verbose] nonfinite loss detected before optimizer step")
-                print("[verbose] " + _stats_for_debug("audio", audio))
-                print("[verbose] " + _stats_for_debug("chunk_mask", chunk_mask))
-                print("[verbose] " + _stats_for_debug("target", target))
-                print("[verbose] " + _stats_for_debug("pred", pred))
-                print("[verbose] " + _stats_for_debug("loss", loss))
-                raise FloatingPointError("nonfinite distillation loss")
             t_student = time.perf_counter() - t0
             t0 = time.perf_counter()
 
@@ -322,6 +314,13 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
 
         if step % cfg.train.log_every == 0 and xla_utils.is_master():
             loss_val = float(loss.detach()) * cfg.train.grad_accum
+            if verbose and not math.isfinite(loss_val):
+                print("[verbose] nonfinite loss detected")
+                print("[verbose] " + _stats_for_debug("audio", audio))
+                print("[verbose] " + _stats_for_debug("chunk_mask", chunk_mask))
+                print("[verbose] " + _stats_for_debug("target", target))
+                print("[verbose] " + _stats_for_debug("pred", pred))
+                print("[verbose] " + _stats_for_debug("loss", loss))
             print(
                 f"step {step:>6d}  loss {loss_val:.4f}  lr {optim.param_groups[0]['lr']:.2e}"
             )
