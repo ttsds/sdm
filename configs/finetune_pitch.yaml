@@ -1,0 +1,47 @@
+# sdm-pitch: distill WORLD F0 (mean per chunk) -- 1-D scalar target.
+# Pitch is computed on the TPU host CPU inside dataloader workers (pyworld).
+
+experiment: sdm-pitch
+
+backbone:
+  model_id: utter-project/mHuBERT-147
+  hidden_size: 768
+  layer_idx: -1
+
+teacher:
+  kind: pyworld_f0
+  in_loop: true                  # extracted by num_workers CPU procs alongside audio
+  cache_dir: null
+  target_dim: 1
+  pooled: chunked                # one scalar per chunk
+
+data:
+  repo_id: amphion/Emilia-Dataset
+  split: train
+  streaming: true
+  shuffle_buffer: 10000
+  seed: 0
+  fraction: 0.1
+  sample_rate: 16000
+  chunk_seconds: 1.0
+  max_chunks: 32
+  num_workers: 8                 # CPU procs that compute F0 keep up with TPU
+
+train:
+  batch_size: 32                 # tiny target -> larger batch fits comfortably
+  grad_accum: 1
+  lr: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 1000
+  total_steps: 15000             # half budget; the regression converges fast
+  log_every: 50
+  ckpt_every: 2500
+  ckpt_dir: gs://sdm-ckpts/sdm-pitch
+  resume_from_latest: true
+  fsdp: true
+  seed: 0
+  wandb:
+    enabled: true
+    project: sdm
+    run_name: sdm-pitch-10pct
+    tags: [finetune, multilingual, 10pct, v6e-8, prosody]

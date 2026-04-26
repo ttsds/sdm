@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+import numpy as np
+import torch
+from torch import nn
+
+from sdm.data.streaming_emilia import EmiliaConfig as StreamCfg
+from sdm.data.streaming_emilia import StreamingEmiliaDataset, collate
+from sdm.modeling.distill_model import BackboneConfig, build_backbone
+from sdm.train import run_distill
+from sdm.train.run_distill import (
+    DistillConfig,
+    DistillTrainConfig,
+    EmiliaConfig,
+    TeacherConfig,
+    _masked_mse,
+    load_config,
+    train,
+)
+
+
+def test_load_config_dry_run_path():
+    cfg = load_config("configs/finetune_xlsr.yaml")
+    assert cfg.experiment == "sdm-xlsr"
+    assert cfg.teacher.kind == "hf_ssl"
+    assert cfg.train.batch_size == 16
+
+
+def test_masked_mse_zeroes_out_padding():
+    pred = torch.zeros(1, 3, 4)
+    target = torch.ones(1, 3, 4)
+    full_mask = torch.ones(1, 3, dtype=torch.bool)
+    full_loss = _masked_mse(pred, target, full_mask).item()
+    assert abs(full_loss - 1.0) < 1e-6
+
+    partial_mask = torch.tensor([[True, False, False]])
+    pred2 = torch.zeros(1, 3, 4)
+    target2 = torch.zeros(1, 3, 4)
+    target2[0, 0] = 2.0  # only the masked-in chunk has error
+    target2[0, 1] = 99.0  # padding, must be ignored
+    loss = _masked_mse(pred2, target2, partial_mask).item()
+    assert abs(loss - 4.0) < 1e-6
+
+
+class _FakeBackbone(nn.Module):
+    def __init__(self, hidden_size: int = 6):
+        super().__init__()
+        self.config = type("C", (), {"hidden_size": hidden_size, "num_hidden_layers": 2})()
+        self.proj = nn.Linear(1, hidden_size)
+
+    def forward(self, input_values, attention_mask=None, output_hidden_states=True, return_dict=True):
+        x = input_values.unsqueeze(-1)
+        h0 = self.proj(x)
+        return type("O", (), {"hidden_states": (h0, h0 + 1.0)})()
+
+
+class _FakeTeacher(nn.Module):
+    target_dim = 4
+
+    def __init__(self, target_dim: int = 4):
+        super().__init__()
+        self.target_dim = target_dim
+
+    def __call__(self, audio, *, chunk_mask=None):  # type: ignore[override]
+        b, n, _ = audio.shape
+        out = torch.zeros(b, n, self.target_dim, dtype=audio.dtype, device=audio.device)
+        if chunk_mask is not None:
+            out = out * chunk_mask.unsqueeze(-1).to(out.dtype)
+        return out
+
+
+def _fake_records(n: int, seconds: float = 1.5, sr: int = 16000):
+    rng = np.random.default_rng(0)
+    for i in range(n):
+        yield {
+            "audio": {
+                "array": rng.standard_normal(int(seconds * sr)).astype(np.float32),
+                "sampling_rate": sr,
+            },
+            "id": f"u{i}",
+            "language": "en",
+        }
+
+
+def test_train_runs_for_few_steps(monkeypatch, tmp_path):
+    # Fake mHuBERT
+    monkeypatch.setattr(
+        "sdm.modeling.distill_model.AutoModel.from_pretrained",
+        lambda model_id: _FakeBackbone(hidden_size=6),
+    )
+    # Fake teacher build path
+    monkeypatch.setattr(run_distill, "_build_teacher", lambda cfg, device: _FakeTeacher(target_dim=4))
+
+    # Fake streaming source
+    records = list(_fake_records(8, seconds=1.5, sr=16000))
+    monkeypatch.setattr(
+        "sdm.data.streaming_emilia._open_emilia_stream",
+        lambda cfg: iter(records),
+    )
+
+    cfg = DistillConfig(
+        experiment="test",
+        backbone=BackboneConfig(model_id="fake/mhubert", hidden_size=6, layer_idx=-1),
+        teacher=TeacherConfig(kind="hf_ssl", target_dim=4, pooled="chunked", model_id="fake", layer=1),
+        data=EmiliaConfig(repo_id="fake", sample_rate=16000, chunk_seconds=1.0, max_chunks=2, num_workers=0),
+        train=DistillTrainConfig(
+            batch_size=2,
+            grad_accum=1,
+            lr=1e-3,
+            warmup_steps=1,
+            total_steps=3,
+            log_every=1,
+            ckpt_every=0,
+            ckpt_dir=str(tmp_path),
+            resume_from_latest=False,
+            fsdp=False,
+        ),
+    )
+
+    train(cfg)
+    # Final checkpoint written
+    assert (tmp_path / "final.pt").exists()
+    assert (tmp_path / "latest.pt").exists()

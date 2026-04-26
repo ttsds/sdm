@@ -1,0 +1,49 @@
+# sdm-wespeaker: distill WeSpeaker windowed embeddings.
+# Native pyannote.audio.Inference is CPU-bound; we wrap the underlying ResNet34
+# directly so it runs on TPU. See sdm/data/teachers/wespeaker.py.
+
+experiment: sdm-wespeaker
+
+backbone:
+  model_id: utter-project/mHuBERT-147
+  hidden_size: 768
+  layer_idx: -1
+
+teacher:
+  kind: wespeaker_resnet34
+  model_id: pyannote/wespeaker-voxceleb-resnet34-LM
+  in_loop: true
+  cache_dir: null
+  target_dim: 256
+  pooled: chunked
+  window_seconds: 1.0
+
+data:
+  repo_id: amphion/Emilia-Dataset
+  split: train
+  streaming: true
+  shuffle_buffer: 10000
+  seed: 0
+  fraction: 0.1
+  sample_rate: 16000
+  chunk_seconds: 1.0
+  max_chunks: 32
+
+train:
+  batch_size: 16
+  grad_accum: 1
+  lr: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 1000
+  total_steps: 30000
+  log_every: 50
+  ckpt_every: 5000
+  ckpt_dir: gs://sdm-ckpts/sdm-wespeaker
+  resume_from_latest: true
+  fsdp: true
+  seed: 0
+  wandb:
+    enabled: true
+    project: sdm
+    run_name: sdm-wespeaker-10pct
+    tags: [finetune, multilingual, 10pct, v6e-8, speaker]

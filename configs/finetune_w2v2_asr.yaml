@@ -1,0 +1,48 @@
+# sdm-w2v2-asr: distill wav2vec2-large-xlsr-53 ASR encoder, per-chunk mean.
+# Note: deviates from TTSDS's per-utterance mean -- we re-extract per chunk so
+# distance comparisons over the dataset are uniform across all 8 experiments.
+
+experiment: sdm-w2v2-asr
+
+backbone:
+  model_id: utter-project/mHuBERT-147
+  hidden_size: 768
+  layer_idx: -1
+
+teacher:
+  kind: hf_ctc
+  model_id: jonatasgrosman/wav2vec2-large-xlsr-53-english   # multilingual ASR ckpt; swap if a better cross-lingual one is preferred
+  in_loop: true
+  cache_dir: null
+  target_dim: 1024
+  pooled: chunked
+
+data:
+  repo_id: amphion/Emilia-Dataset
+  split: train
+  streaming: true
+  shuffle_buffer: 10000
+  seed: 0
+  fraction: 0.1
+  sample_rate: 16000
+  chunk_seconds: 1.0
+  max_chunks: 32
+
+train:
+  batch_size: 16
+  grad_accum: 1
+  lr: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 1000
+  total_steps: 30000
+  log_every: 50
+  ckpt_every: 5000
+  ckpt_dir: gs://sdm-ckpts/sdm-w2v2-asr
+  resume_from_latest: true
+  fsdp: true
+  seed: 0
+  wandb:
+    enabled: true
+    project: sdm
+    run_name: sdm-w2v2-asr-10pct
+    tags: [finetune, multilingual, 10pct, v6e-8, intelligibility]

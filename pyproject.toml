@@ -43,7 +43,6 @@ teachers = [
 # torch-xla wheels must match the torch version exactly; install separately
 # per the PyTorch/XLA release matrix.
 tpu = []
-neucodec = ["neucodec"]
 tracking = ["wandb"]
 dev = [
   "pytest>=7",
@@ -60,16 +59,8 @@ packages = ["sdm"]
 allow-direct-references = true
 
 [tool.uv]
-# `teachers` and `neucodec` pin incompatible numpy ranges; they are only ever
-# installed in disjoint environments (teacher target extraction host vs. main
-# training host), so declare them as a conflict instead of trying to jointly
-# resolve them.
-conflicts = [
-    [
-        { extra = "teachers" },
-        { extra = "neucodec" },
-    ],
-]
+# Teacher dependencies remain isolated from TPU training environments.
+conflicts = []
 
 [tool.ruff]
 line-length = 100

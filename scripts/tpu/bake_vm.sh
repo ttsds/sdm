@@ -49,8 +49,8 @@ uv pip install 'torch~=2.7.0' 'torch_xla[tpu]~=2.7.0' \
     -f https://storage.googleapis.com/libtpu-releases/index.html \
     -f https://storage.googleapis.com/libtpu-wheels/index.html
 
-# SDM + extras (skip teachers — those run on CPU/GPU host, not TPU).
-uv pip install -e '.[neucodec,tracking]'
+# SDM + TPU-safe extras (skip teachers — those run on CPU/GPU host, not TPU).
+uv pip install -e '.[tracking]'
 
 # Sanity: import torch_xla and list devices.
 python - <<'PY'

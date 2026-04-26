@@ -1,0 +1,48 @@
+# sdm-mwhisper: distill multilingual Whisper-small encoder, per-chunk mean.
+# Note: deviates from TTSDS's 1500-d cross-layer-and-hidden-mean trick; we use
+# the conventional encoder hidden states pooled per chunk.
+
+experiment: sdm-mwhisper
+
+backbone:
+  model_id: utter-project/mHuBERT-147
+  hidden_size: 768
+  layer_idx: -1
+
+teacher:
+  kind: whisper_encoder
+  model_id: openai/whisper-small
+  in_loop: true
+  cache_dir: null
+  target_dim: 768                # Whisper-small encoder hidden size
+  pooled: chunked
+
+data:
+  repo_id: amphion/Emilia-Dataset
+  split: train
+  streaming: true
+  shuffle_buffer: 10000
+  seed: 0
+  fraction: 0.1
+  sample_rate: 16000
+  chunk_seconds: 1.0
+  max_chunks: 32
+
+train:
+  batch_size: 12                 # Whisper encoder is heavier than student
+  grad_accum: 1
+  lr: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 1000
+  total_steps: 30000
+  log_every: 50
+  ckpt_every: 5000
+  ckpt_dir: gs://sdm-ckpts/sdm-mwhisper
+  resume_from_latest: true
+  fsdp: true
+  seed: 0
+  wandb:
+    enabled: true
+    project: sdm
+    run_name: sdm-mwhisper-10pct
+    tags: [finetune, multilingual, 10pct, v6e-8, intelligibility]
