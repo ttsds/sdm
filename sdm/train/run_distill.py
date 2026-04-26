@@ -125,7 +125,9 @@ def _build_teacher(cfg: DistillConfig, device: torch.device) -> nn.Module:
     from sdm.data.teachers import build_teacher
 
     if cfg.teacher.kind == "hf_ssl":
-        return build_teacher(_to_hf_ssl_cfg(cfg.teacher), device=device)
+        from sdm.data.teachers.hf_ssl import HfSslTeacher
+
+        return HfSslTeacher(_to_hf_ssl_cfg(cfg.teacher), device=device)
     return build_teacher(cfg.teacher, device=device)
 
 

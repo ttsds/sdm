@@ -69,6 +69,18 @@ class _FakeTeacher(nn.Module):
         return out
 
 
+class _FakeSslTeacher(nn.Module):
+    def __init__(self, cfg, *, device="cpu"):
+        super().__init__()
+        self.cfg = cfg
+        self.target_dim = cfg.target_dim
+        self.device = device
+
+    def __call__(self, audio, *, chunk_mask=None):  # type: ignore[override]
+        b, n, _ = audio.shape
+        return torch.zeros(b, n, self.target_dim, dtype=audio.dtype, device=audio.device)
+
+
 def _fake_records(n: int, seconds: float = 1.5, sr: int = 16000):
     rng = np.random.default_rng(0)
     for i in range(n):
@@ -80,6 +92,32 @@ def _fake_records(n: int, seconds: float = 1.5, sr: int = 16000):
             "id": f"u{i}",
             "language": "en",
         }
+
+
+def test_build_teacher_hf_ssl_uses_concrete_config(monkeypatch):
+    captured = {}
+
+    def _fake_init(self, cfg, *, device="cpu"):
+        nn.Module.__init__(self)
+        captured["cfg"] = cfg
+        captured["device"] = device
+        self.target_dim = cfg.target_dim
+
+    monkeypatch.setattr("sdm.data.teachers.hf_ssl.HfSslTeacher.__init__", _fake_init)
+    cfg = DistillConfig(
+        experiment="test",
+        backbone=BackboneConfig(model_id="fake/mhubert", hidden_size=6, layer_idx=-1),
+        teacher=TeacherConfig(kind="hf_ssl", target_dim=1024, pooled="chunked", model_id="fake", layer=8),
+        data=EmiliaConfig(repo_id="fake"),
+        train=DistillTrainConfig(),
+    )
+
+    teacher = run_distill._build_teacher(cfg, torch.device("cpu"))
+
+    assert teacher.target_dim == 1024
+    assert captured["cfg"].model_id == "fake"
+    assert captured["cfg"].layer == 8
+    assert captured["device"] == torch.device("cpu")
 
 
 def test_train_runs_for_few_steps(monkeypatch, tmp_path):
