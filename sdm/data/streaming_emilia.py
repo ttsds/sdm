@@ -422,6 +422,57 @@ def collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def make_collate(
+    *,
+    teacher_processor_id: str | None = None,
+    sample_rate: int = 16000,
+) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
+    """Build a collate fn that optionally runs an HF AutoFeatureExtractor.
+
+    When ``teacher_processor_id`` is set, the resulting collate emits an extra
+    ``teacher_audio`` tensor of the same shape as ``audio`` (B, N, T) but
+    pre-processed by the teacher's HF feature extractor. This is the canonical
+    HF input path: e.g. for ``facebook/wav2vec2-xls-r-300m`` the extractor
+    applies per-clip zero-mean / unit-variance normalization, which is required
+    by ``feat_extract_norm="layer"`` models. For ``mHuBERT-147`` the extractor
+    is a no-op since ``do_normalize=False``.
+
+    The student backbone keeps consuming raw ``audio`` directly, matching its
+    own processor's behaviour (mHuBERT: ``do_normalize=False``).
+    """
+
+    if teacher_processor_id is None:
+        return collate
+
+    from transformers import AutoFeatureExtractor  # type: ignore
+
+    extractor = AutoFeatureExtractor.from_pretrained(
+        teacher_processor_id, **hf_token_kwargs()
+    )
+
+    def _collate_with_processor(batch: list[dict[str, Any]]) -> dict[str, Any]:
+        out = collate(batch)
+        audio = out["audio"]  # (B, N, T) float32 cpu
+        b, n, t = audio.shape
+        flat_np = audio.reshape(b * n, t).numpy()
+        # All chunks are exactly ``t`` samples (zero-padded for trailing chunks)
+        # so we can disable padding and skip attention_mask: the processor
+        # only normalizes per-clip. Padded all-zero chunks normalize to zeros
+        # (eps in the variance term avoids div-by-zero), and the per-chunk
+        # ``chunk_mask`` keeps them out of the loss downstream.
+        processed = extractor(
+            list(flat_np),
+            sampling_rate=sample_rate,
+            return_tensors="pt",
+            padding=False,
+        )
+        teacher_audio = processed["input_values"].reshape(b, n, t).to(torch.float32)
+        out["teacher_audio"] = teacher_audio
+        return out
+
+    return _collate_with_processor
+
+
 __all__ = [
     "EmiliaConfig",
     "StreamingEmiliaDataset",
@@ -429,5 +480,6 @@ __all__ = [
     "chunk_audio",
     "collate",
     "iter_chunks",
+    "make_collate",
     "samples_per_chunk",
 ]

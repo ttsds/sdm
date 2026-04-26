@@ -110,14 +110,19 @@ def _to_hf_ssl_cfg(cfg: TeacherConfig):
 
 
 def _build_loader(cfg: DistillConfig) -> DataLoader:
-    from sdm.data.streaming_emilia import StreamingEmiliaDataset, collate
+    from sdm.data.streaming_emilia import StreamingEmiliaDataset, make_collate
 
     stream_cfg = _to_streaming_emilia_cfg(cfg.data)
     ds = StreamingEmiliaDataset(stream_cfg)
+    teacher_id = cfg.teacher.model_id if cfg.teacher.kind == "hf_ssl" else None
+    collate_fn = make_collate(
+        teacher_processor_id=teacher_id,
+        sample_rate=cfg.data.sample_rate,
+    )
     return DataLoader(
         ds,
         batch_size=cfg.train.batch_size,
-        collate_fn=collate,
+        collate_fn=collate_fn,
         num_workers=cfg.data.num_workers,
     )
 
@@ -266,11 +271,12 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             t_data = time.perf_counter() - _t_prev
         audio = batch["audio"]
         chunk_mask = batch["chunk_mask"]
+        teacher_audio = batch.get("teacher_audio", audio)
 
         if verbose and xla_utils.is_master():
             t0 = time.perf_counter()
         with torch.no_grad():
-            target = teacher(audio, chunk_mask=chunk_mask)
+            target = teacher(teacher_audio, chunk_mask=chunk_mask)
         if verbose and xla_utils.is_master():
             xla_utils.mark_step()  # force materialization for accurate timing
             t_teacher = time.perf_counter() - t0
@@ -311,6 +317,16 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
                 f"audio {tuple(audio.shape)}"
                 f"{compile_msg}"
             )
+
+        # On the very first iteration, dump tensor stats so we can tell whether
+        # pred starts non-finite (init/forward issue) or drifts there later.
+        if verbose and step == start_step and xla_utils.is_master():
+            print("[verbose] step 0 tensor diagnostics:")
+            print("[verbose] " + _stats_for_debug("audio", audio))
+            print("[verbose] " + _stats_for_debug("chunk_mask", chunk_mask))
+            print("[verbose] " + _stats_for_debug("target", target))
+            print("[verbose] " + _stats_for_debug("pred", pred))
+            print("[verbose] " + _stats_for_debug("loss", loss))
 
         if step % cfg.train.log_every == 0 and xla_utils.is_master():
             loss_val = float(loss.detach()) * cfg.train.grad_accum

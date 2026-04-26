@@ -105,6 +105,23 @@ def _fake_records(n: int, seconds: float = 1.5, sr: int = 16000):
         }
 
 
+def _patch_fake_feature_extractor(monkeypatch):
+    """Stub AutoFeatureExtractor so make_collate doesn't try to hit HF Hub."""
+
+    class _FakeExtractor:
+        @classmethod
+        def from_pretrained(cls, model_id, **kwargs):
+            return cls()
+
+        def __call__(self, audio_list, sampling_rate, return_tensors, padding):
+            arr = np.stack([np.asarray(a, dtype=np.float32) for a in audio_list], axis=0)
+            return {"input_values": torch.from_numpy(arr)}
+
+    import transformers
+
+    monkeypatch.setattr(transformers, "AutoFeatureExtractor", _FakeExtractor, raising=False)
+
+
 def test_build_teacher_hf_ssl_uses_concrete_config(monkeypatch):
     captured = {}
 
@@ -139,6 +156,9 @@ def test_train_runs_for_few_steps(monkeypatch, tmp_path):
     )
     # Fake teacher build path
     monkeypatch.setattr(run_distill, "_build_teacher", lambda cfg, device: _FakeTeacher(target_dim=4))
+
+    # Fake teacher feature extractor (collate path)
+    _patch_fake_feature_extractor(monkeypatch)
 
     # Fake streaming source
     records = list(_fake_records(8, seconds=1.5, sr=16000))
@@ -178,6 +198,7 @@ def test_train_skips_checkpoint_with_nonfinite_model(monkeypatch, tmp_path, caps
         lambda model_id: _FakeBackbone(hidden_size=6),
     )
     monkeypatch.setattr(run_distill, "_build_teacher", lambda cfg, device: _FakeTeacher(target_dim=4))
+    _patch_fake_feature_extractor(monkeypatch)
     records = list(_fake_records(6, seconds=1.5, sr=16000))
     monkeypatch.setattr("sdm.data.streaming_emilia._open_emilia_stream", lambda cfg: iter(records))
 
