@@ -163,38 +163,39 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tens
     return diff.pow(2).sum() / torch.clamp(denom, min=1.0)
 
 
-def _masked_cosine_terms(
+def _masked_mse_terms(
     pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tensor
 ) -> dict[str, torch.Tensor]:
-    """Cosine-distance loss with per-chunk masking.
+    """data2vec-style masked MSE: parameter-free LayerNorm over the feature
+    axis on both prediction and target before computing MSE.
 
-    Returns intermediate tensors so per-step diagnostics can pinpoint which
-    factor first goes non-finite. The loss is ``1 - mean(cos_sim)`` over valid
-    chunks; magnitudes of ``pred`` / ``target`` therefore cannot blow up the
-    loss the way an MSE would for an unnormalized SSL hidden state.
+    The target is expected to already be LayerNorm'd by the teacher (see
+    ``target_layernorm`` in ``HfSslConfig``); applying LN again here is a
+    no-op in expectation but makes the loss robust to the teacher flag and
+    matches the data2vec recipe (LN both sides, then MSE).
     """
     pred_f = pred.float()
     target_f = target.float()
-    mask = chunk_mask.to(pred_f.dtype)  # (B, N)
-    # Per-chunk L2 norms over the feature axis (D).
-    pred_norm = pred_f.norm(dim=-1).clamp_min(1e-8)
-    target_norm = target_f.norm(dim=-1).clamp_min(1e-8)
-    dot = (pred_f * target_f).sum(dim=-1)  # (B, N)
-    cos = dot / (pred_norm * target_norm)
-    cos_dist = 1.0 - cos  # (B, N)
-    masked_cos_dist = cos_dist * mask
+    d = pred_f.shape[-1]
+    pred_n = torch.nn.functional.layer_norm(pred_f, (d,))
+    target_n = torch.nn.functional.layer_norm(target_f, (d,))
+    mask = chunk_mask.to(pred_f.dtype).unsqueeze(-1)
+    raw_diff = pred_n - target_n
+    masked_diff = raw_diff * mask
+    sq = masked_diff.pow(2)
     mask_sum = mask.sum()
-    loss = masked_cos_dist.sum() / torch.clamp(mask_sum, min=1.0)
+    denom = mask_sum * d
+    loss = sq.sum() / torch.clamp(denom, min=1.0)
     return {
         "pred": pred_f,
         "target": target_f,
-        "pred_norm": pred_norm,
-        "target_norm": target_norm,
-        "dot": dot,
-        "cos": cos,
-        "cos_dist": cos_dist,
-        "masked_cos_dist": masked_cos_dist,
+        "pred_n": pred_n,
+        "target_n": target_n,
+        "raw_diff": raw_diff,
+        "masked_diff": masked_diff,
+        "sq": sq,
         "mask_sum": mask_sum,
+        "denom": denom,
         "loss": loss,
     }
 
@@ -321,7 +322,7 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             t0 = time.perf_counter()
 
         pred = student(audio)
-        loss_terms = _masked_cosine_terms(pred, target, chunk_mask)
+        loss_terms = _masked_mse_terms(pred, target, chunk_mask)
         loss = loss_terms["loss"] / cfg.train.grad_accum
         loss.backward()
         if verbose and xla_utils.is_master():
@@ -376,14 +377,14 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
                 print("[verbose] " + _stats_for_debug("chunk_mask", chunk_mask))
                 print("[verbose] " + _stats_for_debug("target", loss_terms["target"]))
                 print("[verbose] " + _stats_for_debug("pred", loss_terms["pred"]))
-                print("[verbose] " + _stats_for_debug("pred_norm", loss_terms["pred_norm"]))
-                print("[verbose] " + _stats_for_debug("target_norm", loss_terms["target_norm"]))
-                print("[verbose] " + _stats_for_debug("dot", loss_terms["dot"]))
-                print("[verbose] " + _stats_for_debug("cos", loss_terms["cos"]))
-                print("[verbose] " + _stats_for_debug("cos_dist", loss_terms["cos_dist"]))
-                print("[verbose] " + _stats_for_debug("masked_cos_dist", loss_terms["masked_cos_dist"]))
+                print("[verbose] " + _stats_for_debug("target_n", loss_terms["target_n"]))
+                print("[verbose] " + _stats_for_debug("pred_n", loss_terms["pred_n"]))
+                print("[verbose] " + _stats_for_debug("raw_diff", loss_terms["raw_diff"]))
+                print("[verbose] " + _stats_for_debug("masked_diff", loss_terms["masked_diff"]))
+                print("[verbose] " + _stats_for_debug("sq", loss_terms["sq"]))
                 print(
-                    f"[verbose] mask_sum={float(loss_terms['mask_sum'].detach().cpu()):.4g}"
+                    f"[verbose] mask_sum={float(loss_terms['mask_sum'].detach().cpu()):.4g} "
+                    f"denom={float(loss_terms['denom'].detach().cpu()):.4g}"
                 )
                 print("[verbose] " + _stats_for_debug("loss", loss))
                 if grad_norm is not None:
