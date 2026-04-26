@@ -148,7 +148,13 @@ def train(cfg: TrainConfig, *, synthetic: bool = False) -> None:
             state = ckpt_io.load_state(latest, map_location="cpu")
             model.load_state_dict(state["model"], strict=False)
             if "optim" in state:
-                optim.load_state_dict(state["optim"])
+                loaded_optim, reason = xla_utils.load_optimizer_state_if_compatible(
+                    optim, state["optim"]
+                )
+                if not loaded_optim:
+                    if xla_utils.is_master():
+                        print(f"skipping optimizer state from {latest}: {reason}")
+                    state["step"] = 0
             start_step = int(state.get("step", 0))
 
     if xla_utils.is_master():

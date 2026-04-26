@@ -54,6 +54,40 @@ def test_shard_module_fsdp_requires_multi_process_xla(monkeypatch):
         xla_utils.shard_module_fsdp(torch.nn.Linear(4, 4))
 
 
+def test_load_optimizer_state_if_compatible_accepts_matching_state():
+    model = torch.nn.Linear(4, 3)
+    optim = torch.optim.AdamW(model.parameters())
+    loss = model(torch.zeros(2, 4)).sum()
+    loss.backward()
+    optim.step()
+
+    state = optim.state_dict()
+    fresh = torch.optim.AdamW(model.parameters())
+
+    loaded, reason = xla_utils.load_optimizer_state_if_compatible(fresh, state)
+
+    assert loaded is True
+    assert reason is None
+
+
+def test_load_optimizer_state_if_compatible_rejects_stale_slot_shape():
+    model = torch.nn.Linear(4, 3)
+    optim = torch.optim.AdamW(model.parameters())
+    loss = model(torch.zeros(2, 4)).sum()
+    loss.backward()
+    optim.step()
+
+    state = optim.state_dict()
+    first_slots = next(iter(state["state"].values()))
+    first_slots["exp_avg"] = torch.zeros(128)
+    fresh = torch.optim.AdamW(model.parameters())
+
+    loaded, reason = xla_utils.load_optimizer_state_if_compatible(fresh, state)
+
+    assert loaded is False
+    assert "exp_avg" in str(reason)
+
+
 def test_shard_module_fsdp_is_noop_off_xla():
     m = torch.nn.Linear(4, 4)
     out = xla_utils.shard_module_fsdp(m)

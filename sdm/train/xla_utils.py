@@ -221,6 +221,50 @@ def reduce_gradients(optimizer: torch.optim.Optimizer) -> None:
     xm.reduce_gradients(optimizer)
 
 
+def load_optimizer_state_if_compatible(
+    optimizer: torch.optim.Optimizer,
+    state: dict[str, Any],
+) -> tuple[bool, str | None]:
+    """Load optimizer state only if tensor slots match current parameter shapes."""
+    current = optimizer.state_dict()
+    current_groups = current.get("param_groups", [])
+    incoming_groups = state.get("param_groups", [])
+    if len(current_groups) != len(incoming_groups):
+        return False, "parameter group count changed"
+
+    param_shapes: dict[int, tuple[int, ...]] = {}
+    for live_group, state_group, incoming_group in zip(
+        optimizer.param_groups, current_groups, incoming_groups, strict=True
+    ):
+        live_params = live_group["params"]
+        state_params = state_group.get("params", [])
+        incoming_params = incoming_group.get("params", [])
+        if len(state_params) != len(incoming_params) or len(live_params) != len(state_params):
+            return False, "parameter group size changed"
+        for live_param, param_id in zip(live_params, state_params, strict=True):
+            param_shapes[int(param_id)] = tuple(live_param.shape)
+
+    for param_id, slots in state.get("state", {}).items():
+        shape = param_shapes.get(int(param_id))
+        if shape is None:
+            return False, f"unknown optimizer parameter id {param_id}"
+        if not isinstance(slots, dict):
+            continue
+        for slot_name, value in slots.items():
+            if torch.is_tensor(value) and value.ndim > 0 and tuple(value.shape) != shape:
+                return (
+                    False,
+                    f"slot {slot_name!r} for parameter {param_id} has shape "
+                    f"{tuple(value.shape)}, expected {shape}",
+                )
+
+    try:
+        optimizer.load_state_dict(state)
+    except (RuntimeError, ValueError) as exc:
+        return False, str(exc)
+    return True, None
+
+
 def save_checkpoint(state: dict[str, Any], path: str) -> None:
     """Master-only save. On XLA we collect a CPU state-dict before writing.
 

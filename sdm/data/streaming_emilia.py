@@ -11,6 +11,7 @@ production it defaults to opening the HF dataset.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from io import BytesIO
@@ -106,9 +107,33 @@ def _open_emilia_stream(cfg: EmiliaConfig) -> Iterable[dict[str, Any]]:
     _disable_audio_encode_torchcodec()
     ds = load_dataset(cfg.repo_id, split=cfg.split, streaming=cfg.streaming, **hf_token_kwargs())
     ds = _cast_audio_to_plain_dict(ds)
+    rank, world_size = _xla_worker_info()
+    if world_size > 1 and hasattr(ds, "shard"):
+        ds = ds.shard(num_shards=world_size, index=rank)
     if cfg.streaming and cfg.shuffle_buffer > 0:
-        ds = ds.shuffle(seed=cfg.seed, buffer_size=cfg.shuffle_buffer)
+        ds = ds.shuffle(seed=cfg.seed + rank, buffer_size=_effective_shuffle_buffer(cfg, world_size))
     return ds
+
+
+def _xla_worker_info() -> tuple[int, int]:
+    try:
+        from sdm.train import xla_utils
+
+        if xla_utils.is_xla():
+            return xla_utils.global_ordinal(), xla_utils.world_size()
+    except Exception:
+        pass
+    return 0, 1
+
+
+def _effective_shuffle_buffer(cfg: EmiliaConfig, world_size: int) -> int:
+    override = os.environ.get("SDM_EMILIA_SHUFFLE_BUFFER")
+    if override is not None:
+        return max(1, int(override))
+    if world_size <= 1:
+        return cfg.shuffle_buffer
+    cap = int(os.environ.get("SDM_TPU_SHUFFLE_BUFFER_CAP", "1024"))
+    return max(1, min(cfg.shuffle_buffer, cap))
 
 
 _AUDIO_ENCODE_PATCHED = False

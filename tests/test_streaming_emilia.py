@@ -123,6 +123,71 @@ def test_open_emilia_stream_passes_hf_token(monkeypatch):
     assert captured["shuffle"] == (7, 4)
 
 
+def test_open_emilia_stream_shards_and_caps_shuffle_on_xla(monkeypatch):
+    captured = {}
+
+    class _FakeStream(list):
+        features = {}
+
+        def shard(self, *, num_shards, index):
+            captured["shard"] = (num_shards, index)
+            return self
+
+        def shuffle(self, *, seed, buffer_size):
+            captured["shuffle"] = (seed, buffer_size)
+            return self
+
+    def _fake_load_dataset(*args, **kwargs):
+        return _FakeStream()
+
+    import datasets
+    from sdm.train import xla_utils
+
+    monkeypatch.setattr(datasets, "load_dataset", _fake_load_dataset)
+    monkeypatch.setattr(xla_utils, "is_xla", lambda: True)
+    monkeypatch.setattr(xla_utils, "global_ordinal", lambda: 3)
+    monkeypatch.setattr(xla_utils, "world_size", lambda: 8)
+    monkeypatch.delenv("SDM_EMILIA_SHUFFLE_BUFFER", raising=False)
+    monkeypatch.delenv("SDM_TPU_SHUFFLE_BUFFER_CAP", raising=False)
+
+    cfg = EmiliaConfig(repo_id="private/repo", split="train", streaming=True, shuffle_buffer=10000, seed=7)
+    _open_emilia_stream(cfg)
+
+    assert captured["shard"] == (8, 3)
+    assert captured["shuffle"] == (10, 1024)
+
+
+def test_open_emilia_stream_shuffle_override_wins(monkeypatch):
+    captured = {}
+
+    class _FakeStream(list):
+        features = {}
+
+        def shard(self, *, num_shards, index):
+            return self
+
+        def shuffle(self, *, seed, buffer_size):
+            captured["shuffle"] = (seed, buffer_size)
+            return self
+
+    def _fake_load_dataset(*args, **kwargs):
+        return _FakeStream()
+
+    import datasets
+    from sdm.train import xla_utils
+
+    monkeypatch.setattr(datasets, "load_dataset", _fake_load_dataset)
+    monkeypatch.setattr(xla_utils, "is_xla", lambda: True)
+    monkeypatch.setattr(xla_utils, "global_ordinal", lambda: 1)
+    monkeypatch.setattr(xla_utils, "world_size", lambda: 8)
+    monkeypatch.setenv("SDM_EMILIA_SHUFFLE_BUFFER", "128")
+
+    cfg = EmiliaConfig(repo_id="private/repo", split="train", streaming=True, shuffle_buffer=10000, seed=7)
+    _open_emilia_stream(cfg)
+
+    assert captured["shuffle"] == (8, 128)
+
+
 def test_cast_audio_to_plain_dict_avoids_audio_feature():
     from datasets import Audio, Features, Value
     from datasets.info import DatasetInfo
