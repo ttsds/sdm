@@ -110,7 +110,13 @@ def train(cfg: FinetuneConfig) -> None:
             if xla_utils.is_master():
                 print(f"resuming from {latest}")
             state = ckpt_io.load_state(latest, map_location="cpu")
-            model.load_state_dict(state["model"], strict=False)
+            model_ok, reason = xla_utils.state_dict_is_finite(state["model"])
+            if not model_ok:
+                if xla_utils.is_master():
+                    print(f"skipping checkpoint from {latest}: {reason}")
+                state = {"step": 0}
+            else:
+                model.load_state_dict(state["model"], strict=False)
             if "optim" in state:
                 loaded_optim, reason = xla_utils.load_optimizer_state_if_compatible(
                     optim, state["optim"]

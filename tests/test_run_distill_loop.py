@@ -170,3 +170,44 @@ def test_train_runs_for_few_steps(monkeypatch, tmp_path):
     # Final checkpoint written
     assert (tmp_path / "final.pt").exists()
     assert (tmp_path / "latest.pt").exists()
+
+
+def test_train_skips_checkpoint_with_nonfinite_model(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(
+        "sdm.modeling.distill_model.AutoModel.from_pretrained",
+        lambda model_id: _FakeBackbone(hidden_size=6),
+    )
+    monkeypatch.setattr(run_distill, "_build_teacher", lambda cfg, device: _FakeTeacher(target_dim=4))
+    records = list(_fake_records(6, seconds=1.5, sr=16000))
+    monkeypatch.setattr("sdm.data.streaming_emilia._open_emilia_stream", lambda cfg: iter(records))
+
+    clean = build_backbone(BackboneConfig(model_id="fake/mhubert", hidden_size=6), target_dim=4)
+    state = clean.state_dict()
+    first_key = next(iter(state))
+    state[first_key] = state[first_key].clone()
+    state[first_key].view(-1)[0] = float("nan")
+    torch.save({"model": state, "step": 50}, tmp_path / "latest.pt")
+
+    cfg = DistillConfig(
+        experiment="test",
+        backbone=BackboneConfig(model_id="fake/mhubert", hidden_size=6, layer_idx=-1),
+        teacher=TeacherConfig(kind="hf_ssl", target_dim=4, pooled="chunked", model_id="fake", layer=1),
+        data=EmiliaConfig(repo_id="fake", sample_rate=16000, chunk_seconds=1.0, max_chunks=2, num_workers=0),
+        train=DistillTrainConfig(
+            batch_size=2,
+            total_steps=1,
+            log_every=1,
+            ckpt_every=0,
+            ckpt_dir=str(tmp_path),
+            resume_from_latest=True,
+            fsdp=False,
+        ),
+    )
+
+    train(cfg)
+
+    out = capsys.readouterr().out
+    assert "skipping checkpoint" in out
+    assert "contains NaN or Inf" in out
+    final = torch.load(tmp_path / "final.pt", map_location="cpu")
+    assert final["step"] == 1

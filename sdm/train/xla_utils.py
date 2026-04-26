@@ -230,6 +230,17 @@ def optimizer_step(optimizer: torch.optim.Optimizer) -> None:
     xm.optimizer_step(optimizer, barrier=True)
 
 
+def state_dict_is_finite(state: dict[str, Any]) -> tuple[bool, str | None]:
+    for name, value in state.items():
+        if torch.is_tensor(value) and not bool(torch.isfinite(value).all().item()):
+            return False, f"tensor {name!r} contains NaN or Inf"
+        if isinstance(value, dict):
+            ok, reason = state_dict_is_finite(value)
+            if not ok:
+                return False, f"{name}.{reason}" if reason else name
+    return True, None
+
+
 def load_optimizer_state_if_compatible(
     optimizer: torch.optim.Optimizer,
     state: dict[str, Any],

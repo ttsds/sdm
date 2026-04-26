@@ -100,6 +100,23 @@ def test_optimizer_step_updates_params_on_cpu():
     assert not torch.equal(model.weight, before)
 
 
+def test_state_dict_is_finite_rejects_nested_nonfinite_tensor():
+    state = {"model": {"weight": torch.tensor([1.0, float("nan")])}}
+
+    ok, reason = xla_utils.state_dict_is_finite(state)
+
+    assert ok is False
+    assert "model" in str(reason)
+    assert "weight" in str(reason)
+
+
+def test_state_dict_is_finite_accepts_finite_tensor():
+    ok, reason = xla_utils.state_dict_is_finite({"weight": torch.ones(2)})
+
+    assert ok is True
+    assert reason is None
+
+
 def test_shard_module_fsdp_is_noop_off_xla():
     m = torch.nn.Linear(4, 4)
     out = xla_utils.shard_module_fsdp(m)
