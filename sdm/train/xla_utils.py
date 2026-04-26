@@ -6,6 +6,7 @@ torch_xla is not installed, so unit tests run in any environment.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -39,6 +40,65 @@ def mark_step() -> None:
     import torch_xla.core.xla_model as xm  # noqa: PLC0415
 
     xm.mark_step()
+
+
+def clear_metrics() -> None:
+    if not is_xla():
+        return
+    import torch_xla.debug.metrics as met  # noqa: PLC0415
+
+    met.clear_all()
+
+
+def compile_metrics() -> dict[str, int]:
+    """Return compact XLA compile counters for recompilation diagnostics."""
+    if not is_xla():
+        return {}
+    import torch_xla.debug.metrics as met  # noqa: PLC0415
+
+    values: dict[str, int] = {}
+
+    if hasattr(met, "counter_value"):
+        for name in ("UncachedCompile", "CachedCompile", "CreateCompileHandles"):
+            try:
+                value = met.counter_value(name)
+            except Exception:
+                continue
+            if value is not None:
+                values[name] = int(value)
+
+    if hasattr(met, "metric_data"):
+        try:
+            compile_time = met.metric_data("CompileTime")
+        except Exception:
+            compile_time = None
+        if compile_time is not None:
+            try:
+                values["CompileTimeSamples"] = int(compile_time[0])
+            except (IndexError, TypeError, ValueError):
+                pass
+
+    if "CompileTimeSamples" not in values:
+        report = met.metrics_report()
+        metric_match = re.search(
+            r"Metric:\s+CompileTime\s+.*?TotalSamples:\s+(\d+)",
+            report,
+            flags=re.DOTALL,
+        )
+        if metric_match:
+            values["CompileTimeSamples"] = int(metric_match.group(1))
+        for name in ("UncachedCompile", "CachedCompile", "CreateCompileHandles"):
+            if name in values:
+                continue
+            counter_match = re.search(
+                rf"Counter:\s+{re.escape(name)}\s+.*?Value:\s+(\d+)",
+                report,
+                flags=re.DOTALL,
+            )
+            if counter_match:
+                values[name] = int(counter_match.group(1))
+
+    return values
 
 
 def world_size() -> int:
