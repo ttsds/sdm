@@ -171,3 +171,43 @@ def test_extract_audio_reads_embedded_wav_bytes():
     assert sample_rate == 8000
     assert array.shape == (8,)
     assert array.dtype == np.float32
+
+
+def test_extract_audio_reads_webdataset_wav_payload():
+    import soundfile as sf
+    from io import BytesIO
+
+    buffer = BytesIO()
+    sf.write(buffer, np.linspace(-0.5, 0.5, 16, dtype=np.float32), 16000, format="WAV")
+
+    record = {
+        "wav": buffer.getvalue(),
+        "json": {"language": "de", "id": "spk-7"},
+        "__key__": "shard/00042",
+        "__url__": "hf://...",
+    }
+
+    array, sample_rate = _extract_audio(record)
+    assert sample_rate == 16000
+    assert array.shape == (16,)
+
+
+def test_extract_id_and_language_from_webdataset_metadata():
+    from sdm.data.streaming_emilia import _extract_id, _extract_language
+
+    record = {
+        "wav": b"",
+        "json": {"language": "fr", "id": "utt-99"},
+        "__key__": "shard/00099",
+    }
+
+    assert _extract_id(record) == "shard/00099"
+    assert _extract_language(record) == "fr"
+
+    # JSON-as-bytes path (HF can deliver raw payload).
+    record2 = {
+        "wav": b"",
+        "json": b'{"language": "es", "utt_id": "x"}',
+    }
+    assert _extract_language(record2) == "es"
+    assert _extract_id(record2) == "x"

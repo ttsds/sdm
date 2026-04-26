@@ -197,8 +197,21 @@ def _read_audio_file(path: str | Path) -> tuple[np.ndarray, int]:
 def _read_audio_bytes(payload: bytes) -> tuple[np.ndarray, int]:
     import soundfile as sf  # type: ignore
 
-    array, sample_rate = sf.read(BytesIO(payload), dtype="float32", always_2d=False)
-    return np.asarray(array, dtype=np.float32), int(sample_rate)
+    try:
+        array, sample_rate = sf.read(BytesIO(payload), dtype="float32", always_2d=False)
+        return np.asarray(array, dtype=np.float32), int(sample_rate)
+    except Exception:
+        # libsndfile may not support the codec (e.g. old builds + mp3). Fall back
+        # to librosa, which uses audioread/ffmpeg under the hood.
+        import tempfile
+
+        import librosa  # type: ignore
+
+        with tempfile.NamedTemporaryFile(suffix=".audio", delete=True) as fh:
+            fh.write(payload)
+            fh.flush()
+            array, sample_rate = librosa.load(fh.name, sr=None, mono=False)
+        return np.asarray(array, dtype=np.float32), int(sample_rate)
 
 
 def _read_audio_path(path: str) -> tuple[np.ndarray, int]:
@@ -212,10 +225,27 @@ def _read_audio_path(path: str) -> tuple[np.ndarray, int]:
         return _read_audio_bytes(handle.read())
 
 
+_WEBDATASET_AUDIO_KEYS = ("flac", "wav", "mp3", "ogg", "opus", "m4a")
+
+
 def _extract_audio(record: dict[str, Any]) -> tuple[np.ndarray, int]:
     audio = record.get("audio")
     if audio is None:
-        raise KeyError(f"record missing 'audio' field; keys={list(record)}")
+        # WebDataset-style records (e.g. amphion/Emilia-Dataset) use the file
+        # extension as the key and store raw bytes as the value.
+        for key in _WEBDATASET_AUDIO_KEYS:
+            payload = record.get(key)
+            if payload is None:
+                continue
+            if isinstance(payload, (bytes, bytearray, memoryview)):
+                return _read_audio_bytes(bytes(payload))
+            if isinstance(payload, dict):
+                audio = payload
+                break
+            if isinstance(payload, str):
+                return _read_audio_path(payload)
+        if audio is None:
+            raise KeyError(f"record missing 'audio' field; keys={list(record)}")
     if isinstance(audio, dict):
         if audio.get("array") is not None:
             array = np.asarray(audio["array"])
@@ -233,10 +263,43 @@ def _extract_audio(record: dict[str, Any]) -> tuple[np.ndarray, int]:
     return array.astype(np.float32, copy=False), sr
 
 
+def _record_metadata(record: dict[str, Any]) -> dict[str, Any]:
+    """Return ``record['json']`` as a parsed dict if present.
+
+    WebDataset Emilia shards bundle metadata in a sibling ``json`` value that
+    can either already be a dict (HF parses it) or a raw bytes/str payload.
+    """
+
+    raw = record.get("json")
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, (bytes, bytearray, memoryview)):
+        try:
+            import json as _json
+
+            return _json.loads(bytes(raw).decode("utf-8"))
+        except Exception:
+            return {}
+    if isinstance(raw, str):
+        try:
+            import json as _json
+
+            return _json.loads(raw)
+        except Exception:
+            return {}
+    return {}
+
+
 def _extract_id(record: dict[str, Any]) -> str:
-    for key in ("id", "utt_id", "audio_id", "filename", "path"):
+    for key in ("id", "utt_id", "audio_id", "filename", "path", "__key__"):
         if key in record and record[key] is not None:
             return str(record[key])
+    meta = _record_metadata(record)
+    for key in ("id", "utt_id", "audio_id", "filename", "path"):
+        if meta.get(key) is not None:
+            return str(meta[key])
     audio = record.get("audio")
     if isinstance(audio, dict) and audio.get("path"):
         return str(audio["path"])
@@ -247,6 +310,10 @@ def _extract_language(record: dict[str, Any]) -> str | None:
     for key in ("language", "lang", "lang_code"):
         if key in record and record[key] is not None:
             return str(record[key])
+    meta = _record_metadata(record)
+    for key in ("language", "lang", "lang_code"):
+        if meta.get(key) is not None:
+            return str(meta[key])
     return None
 
 
