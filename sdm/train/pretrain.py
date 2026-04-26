@@ -198,6 +198,14 @@ def train(cfg: TrainConfig, *, synthetic: bool = False) -> None:
                 loss = loss + cfg.gaussian_loss.weight * gloss / cfg.grad_accum
                 gloss_val = float(gloss.detach())
         loss.backward()
+        if stop.requested:
+            optim.zero_grad(set_to_none=True)
+            if cfg.ckpt_dir:
+                _save(model, optim, step, cfg.ckpt_dir)
+            if xla_utils.is_master():
+                print(f"stop signal received (signum={stop.signum}); exiting")
+            wandb_utils.finish()
+            raise SystemExit(130)
 
         if (step + 1) % cfg.grad_accum == 0:
             for g in optim.param_groups:

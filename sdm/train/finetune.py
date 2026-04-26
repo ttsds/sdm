@@ -163,6 +163,16 @@ def train(cfg: FinetuneConfig) -> None:
                 parts["gaussian"] = float(gloss.detach())
 
         (loss / cfg.grad_accum).backward()
+        if stop.requested:
+            optim.zero_grad(set_to_none=True)
+            if cfg.ckpt_dir:
+                state = {"model": model.state_dict(), "optim": optim.state_dict(), "step": step}
+                xla_utils.save_checkpoint(state, f"{cfg.ckpt_dir}/step-{step:08d}.pt")
+                xla_utils.save_checkpoint(state, f"{cfg.ckpt_dir}/latest.pt")
+            if xla_utils.is_master():
+                print(f"stop signal received (signum={stop.signum}); exiting")
+            wandb_utils.finish()
+            raise SystemExit(130)
 
         if (step + 1) % cfg.grad_accum == 0:
             for g in optim.param_groups:

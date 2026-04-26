@@ -279,6 +279,14 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
         pred = student(audio)
         loss = _masked_mse(pred, target, chunk_mask) / cfg.train.grad_accum
         loss.backward()
+        if stop.requested:
+            optim.zero_grad(set_to_none=True)
+            if cfg.train.ckpt_dir:
+                _save(student, optim, step, cfg.train.ckpt_dir)
+            if xla_utils.is_master():
+                print(f"stop signal received (signum={stop.signum}); exiting")
+            wandb_utils.finish()
+            raise SystemExit(130)
         if verbose and xla_utils.is_master():
             xla_utils.mark_step()
             t_student = time.perf_counter() - t0
