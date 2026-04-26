@@ -16,6 +16,7 @@ teacher:
   cache_dir: null
   target_dim: 1024               # XLS-R hidden size
   pooled: chunked                # mean-pool teacher frames within each 1s chunk
+  target_layernorm: true         # parameter-free LN over feature axis (HuBERT/data2vec-style)
 
 data:
   repo_id: amphion/Emilia-Dataset
@@ -31,9 +32,9 @@ data:
 train:
   batch_size: 16                 # per-chip
   grad_accum: 1
-  lr: 5.0e-5
+  lr: 1.0e-5
   weight_decay: 0.01
-  warmup_steps: 1000
+  warmup_steps: 4000
   total_steps: 30000             # ~10% of Emilia at global batch ~128
   log_every: 1
   ckpt_every: 5000

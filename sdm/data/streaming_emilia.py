@@ -453,20 +453,36 @@ def make_collate(
     def _collate_with_processor(batch: list[dict[str, Any]]) -> dict[str, Any]:
         out = collate(batch)
         audio = out["audio"]  # (B, N, T) float32 cpu
+        chunk_mask = out["chunk_mask"]  # (B, N) bool
         b, n, t = audio.shape
-        flat_np = audio.reshape(b * n, t).numpy()
-        # All chunks are exactly ``t`` samples (zero-padded for trailing chunks)
-        # so we can disable padding and skip attention_mask: the processor
-        # only normalizes per-clip. Padded all-zero chunks normalize to zeros
-        # (eps in the variance term avoids div-by-zero), and the per-chunk
-        # ``chunk_mask`` keeps them out of the loss downstream.
-        processed = extractor(
-            list(flat_np),
-            sampling_rate=sample_rate,
-            return_tensors="pt",
-            padding=False,
-        )
-        teacher_audio = processed["input_values"].reshape(b, n, t).to(torch.float32)
+
+        # XLS-R / wav2vec2 with feat_extract_norm="layer" expects per-UTTERANCE
+        # zero-mean / unit-variance normalization. The HF AutoFeatureExtractor
+        # normalizes per element of its input list, so feeding (B*N) chunks
+        # would normalize each 1-second slice independently — this collapses
+        # near-silent chunks to large z-scores and explodes the teacher's
+        # outlier features. Instead, run the extractor once per utterance on
+        # only the valid (unpadded) samples, then re-chunk and zero-pad.
+        do_normalize = bool(getattr(extractor, "do_normalize", False))
+        if not do_normalize:
+            # Cheap path: extractor is a no-op, just copy raw audio.
+            out["teacher_audio"] = audio.to(torch.float32)
+            return out
+
+        teacher_audio = torch.zeros_like(audio, dtype=torch.float32)
+        for i in range(b):
+            valid_n = int(chunk_mask[i].sum().item())
+            if valid_n <= 0:
+                continue
+            utt = audio[i, :valid_n].reshape(-1).numpy()  # (valid_n * T,)
+            processed = extractor(
+                utt,
+                sampling_rate=sample_rate,
+                return_tensors="pt",
+                padding=False,
+            )
+            normed = processed["input_values"].reshape(-1).to(torch.float32)
+            teacher_audio[i, :valid_n] = normed.reshape(valid_n, t)
         out["teacher_audio"] = teacher_audio
         return out
 

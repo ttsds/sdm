@@ -23,12 +23,13 @@ class HfSslConfig:
     layer: int
     target_dim: int
     pooled: str = "chunked"
+    target_layernorm: bool = True
 
 
 def _coerce_config(cfg: Any) -> HfSslConfig:
     if isinstance(cfg, HfSslConfig):
         return cfg
-    fields = ("model_id", "layer", "target_dim", "pooled")
+    fields = ("model_id", "layer", "target_dim", "pooled", "target_layernorm")
     if hasattr(cfg, "model_id"):
         return HfSslConfig(**{f: getattr(cfg, f) for f in fields if hasattr(cfg, f)})
     return HfSslConfig(**{f: cfg[f] for f in fields if f in cfg})
@@ -47,6 +48,7 @@ class HfSslTeacher(nn.Module):
         self.model = model
         self.layer = int(self.cfg.layer)
         self.target_dim = int(self.cfg.target_dim)
+        self.target_layernorm = bool(self.cfg.target_layernorm)
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad_(False)
@@ -72,6 +74,12 @@ class HfSslTeacher(nn.Module):
                 f"teacher hidden dim {d} != configured target_dim {self.target_dim}"
             )
         features = pooled.reshape(b, n, d)
+        if self.target_layernorm:
+            # Standard fix for distilling from an unnormalized intermediate
+            # SSL hidden state (HuBERT/data2vec/BEATs all do this): apply a
+            # parameter-free LayerNorm over the feature axis so outlier
+            # channels don't dominate the MSE loss / blow up gradients.
+            features = torch.nn.functional.layer_norm(features, (d,))
         if chunk_mask is not None:
             features = features * chunk_mask.unsqueeze(-1).to(features.dtype)
         return features

@@ -34,6 +34,7 @@ class TeacherConfig:
     model_id: str | None = None
     layer: int | None = None
     cache_dir: str | None = None
+    target_layernorm: bool = True
 
 
 @dataclass
@@ -106,6 +107,7 @@ def _to_hf_ssl_cfg(cfg: TeacherConfig):
         layer=int(cfg.layer),
         target_dim=int(cfg.target_dim),
         pooled=cfg.pooled,
+        target_layernorm=bool(cfg.target_layernorm),
     )
 
 
@@ -320,11 +322,20 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             t0 = time.perf_counter()
 
         grad_norm: torch.Tensor | None = None
+        skipped_step = False
         if (step + 1) % cfg.train.grad_accum == 0:
             for g in optim.param_groups:
                 g["lr"] = _lr_at(step // cfg.train.grad_accum, cfg.train)
             grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
-            xla_utils.optimizer_step(optim)
+            if torch.isfinite(grad_norm):
+                xla_utils.optimizer_step(optim)
+            else:
+                skipped_step = True
+                if xla_utils.is_master():
+                    print(
+                        f"[warn] step {step}: non-finite grad_norm "
+                        f"({float(grad_norm.detach().cpu()):.4g}); skipping optimizer step"
+                    )
             optim.zero_grad(set_to_none=True)
         if verbose and xla_utils.is_master():
             t_optim = time.perf_counter() - t0
@@ -367,7 +378,10 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
                 print("[verbose] " + _stats_for_debug("loss", loss))
                 if grad_norm is not None:
                     gn = float(grad_norm.detach().cpu())
-                    print(f"[verbose] grad_norm={gn:.4g} finite={math.isfinite(gn)}")
+                    print(
+                        f"[verbose] grad_norm={gn:.4g} finite={math.isfinite(gn)} "
+                        f"skipped_step={skipped_step}"
+                    )
             print(
                 f"step {step:>6d}  loss {loss_val:.4f}  lr {optim.param_groups[0]['lr']:.2e}"
             )
