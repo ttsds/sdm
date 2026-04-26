@@ -88,18 +88,6 @@ def test_load_optimizer_state_if_compatible_rejects_stale_slot_shape():
     assert "exp_avg" in str(reason)
 
 
-def test_optimizer_step_updates_params_on_cpu():
-    model = torch.nn.Linear(4, 3)
-    optim = torch.optim.AdamW(model.parameters(), lr=0.1)
-    before = model.weight.detach().clone()
-    loss = model(torch.ones(2, 4)).sum()
-    loss.backward()
-
-    xla_utils.optimizer_step(optim)
-
-    assert not torch.equal(model.weight, before)
-
-
 def test_state_dict_is_finite_rejects_nested_nonfinite_tensor():
     state = {"model": {"weight": torch.tensor([1.0, float("nan")])}}
 

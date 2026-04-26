@@ -168,8 +168,10 @@ def train(cfg: FinetuneConfig) -> None:
             for g in optim.param_groups:
                 g["lr"] = _lr_at(step // cfg.grad_accum, cfg)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0, error_if_nonfinite=True)
-            xla_utils.optimizer_step(optim)
+            xla_utils.reduce_gradients(optim)
+            optim.step()
             optim.zero_grad(set_to_none=True)
+            xla_utils.mark_step()
 
         if step % cfg.log_every == 0 and xla_utils.is_master():
             parts_s = " ".join(f"{k}={v:.4f}" for k, v in parts.items())

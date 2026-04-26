@@ -221,15 +221,6 @@ def reduce_gradients(optimizer: torch.optim.Optimizer) -> None:
     xm.reduce_gradients(optimizer)
 
 
-def optimizer_step(optimizer: torch.optim.Optimizer) -> None:
-    if not is_xla():
-        optimizer.step()
-        return
-    import torch_xla.core.xla_model as xm  # noqa: PLC0415
-
-    xm.optimizer_step(optimizer, barrier=True)
-
-
 def state_dict_is_finite(state: dict[str, Any]) -> tuple[bool, str | None]:
     for name, value in state.items():
         if torch.is_tensor(value) and not bool(torch.isfinite(value).all().item()):
