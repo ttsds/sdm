@@ -163,30 +163,38 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tens
     return diff.pow(2).sum() / torch.clamp(denom, min=1.0)
 
 
-def _masked_mse_terms(
+def _masked_cosine_terms(
     pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tensor
 ) -> dict[str, torch.Tensor]:
-    """Return all intermediate tensors used in the masked MSE.
+    """Cosine-distance loss with per-chunk masking.
 
-    Useful for per-step NaN diagnosis: each term can be printed via
-    ``_stats_for_debug`` to pinpoint which factor first goes non-finite.
+    Returns intermediate tensors so per-step diagnostics can pinpoint which
+    factor first goes non-finite. The loss is ``1 - mean(cos_sim)`` over valid
+    chunks; magnitudes of ``pred`` / ``target`` therefore cannot blow up the
+    loss the way an MSE would for an unnormalized SSL hidden state.
     """
     pred_f = pred.float()
     target_f = target.float()
-    mask = chunk_mask.to(pred_f.dtype).unsqueeze(-1)
-    raw_diff = pred_f - target_f
-    masked_diff = raw_diff * mask
-    sq = masked_diff.pow(2)
-    denom = mask.sum() * pred_f.shape[-1]
-    loss = sq.sum() / torch.clamp(denom, min=1.0)
+    mask = chunk_mask.to(pred_f.dtype)  # (B, N)
+    # Per-chunk L2 norms over the feature axis (D).
+    pred_norm = pred_f.norm(dim=-1).clamp_min(1e-8)
+    target_norm = target_f.norm(dim=-1).clamp_min(1e-8)
+    dot = (pred_f * target_f).sum(dim=-1)  # (B, N)
+    cos = dot / (pred_norm * target_norm)
+    cos_dist = 1.0 - cos  # (B, N)
+    masked_cos_dist = cos_dist * mask
+    mask_sum = mask.sum()
+    loss = masked_cos_dist.sum() / torch.clamp(mask_sum, min=1.0)
     return {
         "pred": pred_f,
         "target": target_f,
-        "raw_diff": raw_diff,
-        "masked_diff": masked_diff,
-        "sq": sq,
-        "mask_sum": mask.sum(),
-        "denom": denom,
+        "pred_norm": pred_norm,
+        "target_norm": target_norm,
+        "dot": dot,
+        "cos": cos,
+        "cos_dist": cos_dist,
+        "masked_cos_dist": masked_cos_dist,
+        "mask_sum": mask_sum,
         "loss": loss,
     }
 
@@ -313,7 +321,7 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             t0 = time.perf_counter()
 
         pred = student(audio)
-        loss_terms = _masked_mse_terms(pred, target, chunk_mask)
+        loss_terms = _masked_cosine_terms(pred, target, chunk_mask)
         loss = loss_terms["loss"] / cfg.train.grad_accum
         loss.backward()
         if verbose and xla_utils.is_master():
@@ -368,12 +376,14 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
                 print("[verbose] " + _stats_for_debug("chunk_mask", chunk_mask))
                 print("[verbose] " + _stats_for_debug("target", loss_terms["target"]))
                 print("[verbose] " + _stats_for_debug("pred", loss_terms["pred"]))
-                print("[verbose] " + _stats_for_debug("raw_diff", loss_terms["raw_diff"]))
-                print("[verbose] " + _stats_for_debug("masked_diff", loss_terms["masked_diff"]))
-                print("[verbose] " + _stats_for_debug("sq", loss_terms["sq"]))
+                print("[verbose] " + _stats_for_debug("pred_norm", loss_terms["pred_norm"]))
+                print("[verbose] " + _stats_for_debug("target_norm", loss_terms["target_norm"]))
+                print("[verbose] " + _stats_for_debug("dot", loss_terms["dot"]))
+                print("[verbose] " + _stats_for_debug("cos", loss_terms["cos"]))
+                print("[verbose] " + _stats_for_debug("cos_dist", loss_terms["cos_dist"]))
+                print("[verbose] " + _stats_for_debug("masked_cos_dist", loss_terms["masked_cos_dist"]))
                 print(
-                    f"[verbose] mask_sum={float(loss_terms['mask_sum'].detach().cpu()):.4g} "
-                    f"denom={float(loss_terms['denom'].detach().cpu()):.4g}"
+                    f"[verbose] mask_sum={float(loss_terms['mask_sum'].detach().cpu()):.4g}"
                 )
                 print("[verbose] " + _stats_for_debug("loss", loss))
                 if grad_norm is not None:

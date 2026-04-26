@@ -32,9 +32,9 @@ data:
 train:
   batch_size: 16                 # per-chip
   grad_accum: 1
-  lr: 1.0e-5
+  lr: 5.0e-5
   weight_decay: 0.01
-  warmup_steps: 4000
+  warmup_steps: 1000
   total_steps: 30000             # ~10% of Emilia at global batch ~128
   log_every: 1
   ckpt_every: 5000
