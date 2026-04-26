@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import math
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -153,18 +154,33 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tens
     return diff.pow(2).sum() / torch.clamp(denom, min=1.0)
 
 
-def train(cfg: DistillConfig) -> None:
+def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
     torch.manual_seed(cfg.train.seed)
     device = xla_utils.get_device()
     stop = preempt.install()
 
+    if verbose and xla_utils.is_master():
+        print(f"[verbose] experiment={cfg.experiment}")
+        print(f"[verbose] device={device}")
+        print(f"[verbose] backbone={cfg.backbone.__dict__}")
+        print(f"[verbose] teacher={cfg.teacher.__dict__}")
+        print(f"[verbose] data={cfg.data.__dict__}")
+        print(f"[verbose] train={cfg.train.__dict__}")
+
+    t0 = time.perf_counter()
     student = build_backbone(cfg.backbone, target_dim=cfg.teacher.target_dim).to(device)
     if cfg.train.fsdp:
         student = xla_utils.shard_module_fsdp(student)
     student.train()
+    if verbose and xla_utils.is_master():
+        n_params = sum(p.numel() for p in student.parameters())
+        print(f"[verbose] student built ({n_params/1e6:.1f}M params) in {time.perf_counter()-t0:.2f}s")
 
+    t0 = time.perf_counter()
     teacher = _build_teacher(cfg, device)
     teacher.eval()
+    if verbose and xla_utils.is_master():
+        print(f"[verbose] teacher built in {time.perf_counter()-t0:.2f}s")
 
     loader = _build_loader(cfg)
     device_loader = xla_utils.loader_per_device(loader, device)
@@ -211,15 +227,31 @@ def train(cfg: DistillConfig) -> None:
 
     step = start_step
     optim.zero_grad(set_to_none=True)
+    if verbose and xla_utils.is_master():
+        print("[verbose] entering training loop; waiting for first batch ...")
+    _t_prev = time.perf_counter()
     for batch in device_loader:
+        if verbose and xla_utils.is_master():
+            t_data = time.perf_counter() - _t_prev
         audio = batch["audio"]
         chunk_mask = batch["chunk_mask"]
 
+        if verbose and xla_utils.is_master():
+            t0 = time.perf_counter()
         with torch.no_grad():
             target = teacher(audio, chunk_mask=chunk_mask)
+        if verbose and xla_utils.is_master():
+            xla_utils.mark_step()  # force materialization for accurate timing
+            t_teacher = time.perf_counter() - t0
+            t0 = time.perf_counter()
+
         pred = student(audio)
         loss = _masked_mse(pred, target, chunk_mask) / cfg.train.grad_accum
         loss.backward()
+        if verbose and xla_utils.is_master():
+            xla_utils.mark_step()
+            t_student = time.perf_counter() - t0
+            t0 = time.perf_counter()
 
         if (step + 1) % cfg.train.grad_accum == 0:
             for g in optim.param_groups:
@@ -229,6 +261,16 @@ def train(cfg: DistillConfig) -> None:
             optim.step()
             optim.zero_grad(set_to_none=True)
             xla_utils.mark_step()
+        if verbose and xla_utils.is_master():
+            t_optim = time.perf_counter() - t0
+            print(
+                f"[verbose] step {step:>6d}  "
+                f"data {t_data*1e3:7.1f}ms  "
+                f"teacher {t_teacher*1e3:7.1f}ms  "
+                f"student {t_student*1e3:7.1f}ms  "
+                f"optim {t_optim*1e3:7.1f}ms  "
+                f"audio {tuple(audio.shape)}"
+            )
 
         if step % cfg.train.log_every == 0 and xla_utils.is_master():
             loss_val = float(loss.detach()) * cfg.train.grad_accum
@@ -256,6 +298,8 @@ def train(cfg: DistillConfig) -> None:
         step += 1
         if step >= cfg.train.total_steps:
             break
+        if verbose and xla_utils.is_master():
+            _t_prev = time.perf_counter()
 
     if cfg.train.ckpt_dir:
         state = {"model": student.state_dict(), "optim": optim.state_dict(), "step": step}
@@ -269,6 +313,12 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
     parser.add_argument("--dry-run", action="store_true", help="Load config and check imports only")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print per-step phase timings (data/teacher/student/optim) and startup info",
+    )
     args = parser.parse_args()
 
     cfg = load_config(args.config)
@@ -279,7 +329,7 @@ def main() -> None:
         print(f"dry-run OK: experiment={cfg.experiment} teacher.kind={cfg.teacher.kind}")
         return
 
-    train(cfg)
+    train(cfg, verbose=args.verbose)
 
 
 if __name__ == "__main__":

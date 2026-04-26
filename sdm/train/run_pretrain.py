@@ -34,8 +34,21 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True)
     p.add_argument("--synthetic", action="store_true")
+    p.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print loaded config before starting training",
+    )
     args = p.parse_args()
     cfg = load_config(args.config)
+    if args.verbose:
+        print(f"[verbose] config={args.config} synthetic={args.synthetic}")
+        print(f"[verbose] model={cfg.model.__dict__}")
+        print(f"[verbose] data={cfg.data.__dict__}")
+        print(f"[verbose] mlm={cfg.mlm.__dict__}")
+        train_dict = {k: v for k, v in cfg.__dict__.items() if k not in ("model", "data", "mlm")}
+        print(f"[verbose] train={train_dict}")
     train(cfg, synthetic=args.synthetic)
 
 
