@@ -12,7 +12,8 @@ authors = [
   { name = "Christoph Minixhofer", email = "christoph.minixhofer@gmail.com" },
 ]
 dependencies = [
-  "torch",
+  "torch~=2.7.0; python_version < '3.14'",
+  "torch; python_version >= '3.14'",
   "transformers>=4.40",
   "datasets>=2.18",
   "huggingface-hub",
