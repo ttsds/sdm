@@ -125,18 +125,38 @@ def test_open_emilia_stream_passes_hf_token(monkeypatch):
 
 def test_cast_audio_to_plain_dict_avoids_audio_feature():
     from datasets import Audio, Features, Value
+    from datasets.info import DatasetInfo
 
     class _FakeStream(list):
-        features = Features({"audio": Audio(), "id": Value("string")})
+        def __init__(self):
+            super().__init__()
+            self.features = Features({"audio": Audio(), "id": Value("string")})
+            self._info = DatasetInfo(features=self.features)
 
         def cast(self, features):
             self.features = features
+            self._info.features = features
             return self
 
     ds = _cast_audio_to_plain_dict(_FakeStream())
 
+    # Cast was applied (audio is no longer the HF Audio feature).
     assert not isinstance(ds.features["audio"], Audio)
     assert set(ds.features["audio"]) == {"array", "sampling_rate", "path", "bytes"}
+    # And as a defense-in-depth, _info.features is cleared so HF skips encoding.
+    assert ds._info.features is None
+
+
+def test_disable_audio_encode_torchcodec_passthrough():
+    from datasets import Audio
+    from sdm.data.streaming_emilia import _disable_audio_encode_torchcodec
+
+    _disable_audio_encode_torchcodec()
+    audio = Audio()
+    payload = {"array": np.zeros(8, dtype=np.float32), "sampling_rate": 8000}
+    # Must not raise even though torchcodec is not installed locally.
+    result = audio.encode_example(payload)
+    assert result is payload
 
 
 def test_extract_audio_reads_embedded_wav_bytes():

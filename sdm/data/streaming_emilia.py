@@ -103,6 +103,7 @@ def chunk_audio(
 def _open_emilia_stream(cfg: EmiliaConfig) -> Iterable[dict[str, Any]]:
     from datasets import load_dataset  # type: ignore
 
+    _disable_audio_encode_torchcodec()
     ds = load_dataset(cfg.repo_id, split=cfg.split, streaming=cfg.streaming, **hf_token_kwargs())
     ds = _cast_audio_to_plain_dict(ds)
     if cfg.streaming and cfg.shuffle_buffer > 0:
@@ -110,26 +111,80 @@ def _open_emilia_stream(cfg: EmiliaConfig) -> Iterable[dict[str, Any]]:
     return ds
 
 
+_AUDIO_ENCODE_PATCHED = False
+
+
+def _disable_audio_encode_torchcodec() -> None:
+    """Monkey-patch ``datasets.features.audio.Audio.encode_example``.
+
+    HF >=4 imports ``torchcodec`` whenever a streaming example contains an
+    audio dict with ``array`` + ``sampling_rate`` so it can re-encode it to
+    bytes. We never need that round-trip on TPUs (the loader decodes the raw
+    array directly), so replace ``encode_example`` with a passthrough that
+    keeps the original dict and only delegates to the upstream implementation
+    for the cheap path-only / bytes-only cases.
+    """
+
+    global _AUDIO_ENCODE_PATCHED
+    if _AUDIO_ENCODE_PATCHED:
+        return
+
+    try:
+        from datasets.features.audio import Audio  # type: ignore
+    except Exception:  # pragma: no cover - datasets unavailable
+        return
+
+    original = Audio.encode_example
+
+    def _safe_encode_example(self, value):  # type: ignore[no-untyped-def]
+        if isinstance(value, dict) and "array" in value:
+            # Already-decoded HF audio dict. Keep it as-is so downstream
+            # consumers can read ``array`` / ``sampling_rate`` without going
+            # through TorchCodec.
+            return value
+        return original(self, value)
+
+    Audio.encode_example = _safe_encode_example  # type: ignore[assignment]
+    _AUDIO_ENCODE_PATCHED = True
+
+
 def _cast_audio_to_plain_dict(ds: Any) -> Any:
-    """Keep HF Audio columns as raw dicts so TorchCodec is not needed on TPUs."""
+    """Best-effort: drop the HF Audio feature so iteration skips re-encoding.
+
+    Streaming ``IterableDataset.cast`` does not always re-route the encode
+    path used by ``_apply_feature_types_on_example`` (the original feature
+    info is preserved on the underlying ex_iterable). We still apply the cast
+    where possible, but we also forcibly clear ``_info.features`` so HF will
+    treat each example as an unstructured dict and never call
+    ``Audio.encode_example`` at all. The :func:`_disable_audio_encode_torchcodec`
+    monkey-patch acts as a final safety net.
+    """
 
     features = getattr(ds, "features", None)
-    if not features or "audio" not in features:
-        return ds
+    if features and "audio" in features:
+        try:
+            from datasets import Audio, Features, Sequence, Value  # type: ignore
 
-    from datasets import Audio, Features, Sequence, Value  # type: ignore
+            if isinstance(features["audio"], Audio):
+                plain_features = dict(features)
+                plain_features["audio"] = {
+                    "array": Sequence(Value("float32")),
+                    "sampling_rate": Value("int64"),
+                    "path": Value("string"),
+                    "bytes": Value("binary"),
+                }
+                ds = ds.cast(Features(plain_features))
+        except Exception:
+            pass
 
-    if not isinstance(features["audio"], Audio):
-        return ds
+    info = getattr(ds, "_info", None)
+    if info is not None and getattr(info, "features", None) is not None:
+        try:
+            info.features = None
+        except Exception:
+            pass
 
-    plain_features = dict(features)
-    plain_features["audio"] = {
-        "array": Sequence(Value("float32")),
-        "sampling_rate": Value("int64"),
-        "path": Value("string"),
-        "bytes": Value("binary"),
-    }
-    return ds.cast(Features(plain_features))
+    return ds
 
 
 def _read_audio_file(path: str | Path) -> tuple[np.ndarray, int]:
