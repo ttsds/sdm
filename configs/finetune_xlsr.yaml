@@ -35,7 +35,7 @@ train:
   weight_decay: 0.01
   warmup_steps: 1000
   total_steps: 30000             # ~10% of Emilia at global batch ~128
-  log_every: 50
+  log_every: 1
   ckpt_every: 5000
   ckpt_dir: gs://sdm-ckpts/sdm-xlsr
   resume_from_latest: true

@@ -161,6 +161,34 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tens
     return diff.pow(2).sum() / torch.clamp(denom, min=1.0)
 
 
+def _masked_mse_terms(
+    pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    """Return all intermediate tensors used in the masked MSE.
+
+    Useful for per-step NaN diagnosis: each term can be printed via
+    ``_stats_for_debug`` to pinpoint which factor first goes non-finite.
+    """
+    pred_f = pred.float()
+    target_f = target.float()
+    mask = chunk_mask.to(pred_f.dtype).unsqueeze(-1)
+    raw_diff = pred_f - target_f
+    masked_diff = raw_diff * mask
+    sq = masked_diff.pow(2)
+    denom = mask.sum() * pred_f.shape[-1]
+    loss = sq.sum() / torch.clamp(denom, min=1.0)
+    return {
+        "pred": pred_f,
+        "target": target_f,
+        "raw_diff": raw_diff,
+        "masked_diff": masked_diff,
+        "sq": sq,
+        "mask_sum": mask.sum(),
+        "denom": denom,
+        "loss": loss,
+    }
+
+
 def _stats_for_debug(name: str, tensor: torch.Tensor) -> str:
     value = tensor.detach().float()
     finite = torch.isfinite(value)
@@ -283,17 +311,19 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             t0 = time.perf_counter()
 
         pred = student(audio)
-        loss = _masked_mse(pred, target, chunk_mask) / cfg.train.grad_accum
+        loss_terms = _masked_mse_terms(pred, target, chunk_mask)
+        loss = loss_terms["loss"] / cfg.train.grad_accum
         loss.backward()
         if verbose and xla_utils.is_master():
             xla_utils.mark_step()
             t_student = time.perf_counter() - t0
             t0 = time.perf_counter()
 
+        grad_norm: torch.Tensor | None = None
         if (step + 1) % cfg.train.grad_accum == 0:
             for g in optim.param_groups:
                 g["lr"] = _lr_at(step // cfg.train.grad_accum, cfg.train)
-            torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
             xla_utils.optimizer_step(optim)
             optim.zero_grad(set_to_none=True)
         if verbose and xla_utils.is_master():
@@ -318,25 +348,26 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
                 f"{compile_msg}"
             )
 
-        # On the very first iteration, dump tensor stats so we can tell whether
-        # pred starts non-finite (init/forward issue) or drifts there later.
-        if verbose and step == start_step and xla_utils.is_master():
-            print("[verbose] step 0 tensor diagnostics:")
-            print("[verbose] " + _stats_for_debug("audio", audio))
-            print("[verbose] " + _stats_for_debug("chunk_mask", chunk_mask))
-            print("[verbose] " + _stats_for_debug("target", target))
-            print("[verbose] " + _stats_for_debug("pred", pred))
-            print("[verbose] " + _stats_for_debug("loss", loss))
-
         if step % cfg.train.log_every == 0 and xla_utils.is_master():
             loss_val = float(loss.detach()) * cfg.train.grad_accum
-            if verbose and not math.isfinite(loss_val):
-                print("[verbose] nonfinite loss detected")
+            if verbose:
+                print(f"[verbose] step {step} tensor diagnostics:")
                 print("[verbose] " + _stats_for_debug("audio", audio))
+                print("[verbose] " + _stats_for_debug("teacher_audio", teacher_audio))
                 print("[verbose] " + _stats_for_debug("chunk_mask", chunk_mask))
-                print("[verbose] " + _stats_for_debug("target", target))
-                print("[verbose] " + _stats_for_debug("pred", pred))
+                print("[verbose] " + _stats_for_debug("target", loss_terms["target"]))
+                print("[verbose] " + _stats_for_debug("pred", loss_terms["pred"]))
+                print("[verbose] " + _stats_for_debug("raw_diff", loss_terms["raw_diff"]))
+                print("[verbose] " + _stats_for_debug("masked_diff", loss_terms["masked_diff"]))
+                print("[verbose] " + _stats_for_debug("sq", loss_terms["sq"]))
+                print(
+                    f"[verbose] mask_sum={float(loss_terms['mask_sum'].detach().cpu()):.4g} "
+                    f"denom={float(loss_terms['denom'].detach().cpu()):.4g}"
+                )
                 print("[verbose] " + _stats_for_debug("loss", loss))
+                if grad_norm is not None:
+                    gn = float(grad_norm.detach().cpu())
+                    print(f"[verbose] grad_norm={gn:.4g} finite={math.isfinite(gn)}")
             print(
                 f"step {step:>6d}  loss {loss_val:.4f}  lr {optim.param_groups[0]['lr']:.2e}"
             )
