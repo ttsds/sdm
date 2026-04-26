@@ -9,6 +9,7 @@ from sdm.data.streaming_emilia import (
     chunk_audio,
     collate,
     iter_chunks,
+    _open_emilia_stream,
     samples_per_chunk,
 )
 
@@ -90,3 +91,29 @@ def test_streaming_dataset_iterates():
     items = list(ds)
     assert len(items) == 2
     assert items[0]["audio"].dtype == torch.float32
+
+
+def test_open_emilia_stream_passes_hf_token(monkeypatch):
+    captured = {}
+
+    class _FakeStream(list):
+        def shuffle(self, *, seed, buffer_size):
+            captured["shuffle"] = (seed, buffer_size)
+            return self
+
+    def _fake_load_dataset(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return _FakeStream()
+
+    import datasets
+
+    monkeypatch.setenv("hf_token", "secret-token")
+    monkeypatch.setattr(datasets, "load_dataset", _fake_load_dataset)
+
+    cfg = EmiliaConfig(repo_id="private/repo", split="train", streaming=True, shuffle_buffer=4, seed=7)
+    _open_emilia_stream(cfg)
+
+    assert captured["args"] == ("private/repo",)
+    assert captured["kwargs"]["token"] == "secret-token"
+    assert captured["shuffle"] == (7, 4)

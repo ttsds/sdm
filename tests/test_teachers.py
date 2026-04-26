@@ -82,6 +82,25 @@ def test_build_teacher_dispatches_hf_ssl():
         hf_ssl_mod.HfSslTeacher.__init__ = orig_init  # type: ignore[assignment]
 
 
+def test_hf_ssl_from_pretrained_uses_hf_token(monkeypatch):
+    captured = {}
+
+    def _fake_from_pretrained(model_id, **kwargs):
+        captured["model_id"] = model_id
+        captured["kwargs"] = kwargs
+        return _FakeSslModel(hidden_size=8)
+
+    import transformers
+
+    monkeypatch.setenv("hf_token", "secret-token")
+    monkeypatch.setattr(transformers.AutoModel, "from_pretrained", _fake_from_pretrained)
+
+    HfSslTeacher(HfSslConfig(model_id="private/teacher", layer=1, target_dim=8))
+
+    assert captured["model_id"] == "private/teacher"
+    assert captured["kwargs"]["token"] == "secret-token"
+
+
 def test_build_teacher_unknown_kind_raises():
     class _CfgObj:
         kind = "definitely-not-real"

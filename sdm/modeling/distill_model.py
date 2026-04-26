@@ -15,6 +15,8 @@ import torch
 from torch import nn
 from transformers import AutoModel
 
+from sdm.dotenv import hf_token_kwargs
+
 
 DEFAULT_BACKBONE_MODEL_ID = "utter-project/mHuBERT-147"
 
@@ -82,7 +84,7 @@ class DistillModel(nn.Module):
 
 
 def build_backbone(cfg: BackboneConfig, *, target_dim: int | None = None) -> DistillModel:
-    backbone = AutoModel.from_pretrained(cfg.model_id)
+    backbone = AutoModel.from_pretrained(cfg.model_id, **hf_token_kwargs())
     model_hidden = int(backbone.config.hidden_size)
     if model_hidden != cfg.hidden_size:
         raise ValueError(
@@ -99,7 +101,7 @@ def load_backbone(
 ) -> DistillModel:
     checkpoint = torch.load(Path(path), map_location="cpu")
     state = checkpoint.get("model", checkpoint)
-    model = DistillModel(AutoModel.from_pretrained(model_id), layer_idx=layer_idx)
+    model = DistillModel(AutoModel.from_pretrained(model_id, **hf_token_kwargs()), layer_idx=layer_idx)
     model.load_state_dict(state, strict=False)
     model.eval()
     return model

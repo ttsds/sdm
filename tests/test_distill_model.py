@@ -33,7 +33,7 @@ def test_build_backbone_pools_chunks(monkeypatch, tmp_path):
     fake = _FakeBackbone(hidden_size=6)
     monkeypatch.setattr(
         "sdm.modeling.distill_model.AutoModel.from_pretrained",
-        lambda model_id: fake,
+        lambda model_id, **kwargs: fake,
     )
 
     model = build_backbone(BackboneConfig(model_id="fake/mhubert", hidden_size=6, layer_idx=-1))
@@ -52,7 +52,7 @@ def test_build_backbone_pools_chunks(monkeypatch, tmp_path):
 def test_build_backbone_checks_hidden_size(monkeypatch):
     monkeypatch.setattr(
         "sdm.modeling.distill_model.AutoModel.from_pretrained",
-        lambda model_id: _FakeBackbone(hidden_size=5),
+        lambda model_id, **kwargs: _FakeBackbone(hidden_size=5),
     )
 
     try:
@@ -61,3 +61,20 @@ def test_build_backbone_checks_hidden_size(monkeypatch):
         assert "hidden_size mismatch" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("expected hidden-size mismatch")
+
+
+def test_build_backbone_uses_hf_token(monkeypatch):
+    captured = {}
+
+    def _fake_from_pretrained(model_id, **kwargs):
+        captured["model_id"] = model_id
+        captured["kwargs"] = kwargs
+        return _FakeBackbone(hidden_size=6)
+
+    monkeypatch.setenv("hf_token", "secret-token")
+    monkeypatch.setattr("sdm.modeling.distill_model.AutoModel.from_pretrained", _fake_from_pretrained)
+
+    build_backbone(BackboneConfig(model_id="private/backbone", hidden_size=6))
+
+    assert captured["model_id"] == "private/backbone"
+    assert captured["kwargs"]["token"] == "secret-token"

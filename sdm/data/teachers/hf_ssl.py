@@ -14,6 +14,8 @@ from typing import Any
 import torch
 from torch import nn
 
+from sdm.dotenv import hf_token_kwargs
+
 
 @dataclass
 class HfSslConfig:
@@ -41,7 +43,7 @@ class HfSslTeacher(nn.Module):
         if model is None:
             from transformers import AutoModel  # type: ignore
 
-            model = AutoModel.from_pretrained(self.cfg.model_id)
+            model = AutoModel.from_pretrained(self.cfg.model_id, **hf_token_kwargs())
         self.model = model
         self.layer = int(self.cfg.layer)
         self.target_dim = int(self.cfg.target_dim)

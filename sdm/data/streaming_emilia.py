@@ -19,6 +19,8 @@ import numpy as np
 import torch
 from torch.utils.data import IterableDataset
 
+from sdm.dotenv import hf_token_kwargs
+
 
 @dataclass
 class EmiliaConfig:
@@ -99,7 +101,7 @@ def chunk_audio(
 def _open_emilia_stream(cfg: EmiliaConfig) -> Iterable[dict[str, Any]]:
     from datasets import load_dataset  # type: ignore
 
-    ds = load_dataset(cfg.repo_id, split=cfg.split, streaming=cfg.streaming)
+    ds = load_dataset(cfg.repo_id, split=cfg.split, streaming=cfg.streaming, **hf_token_kwargs())
     if cfg.streaming and cfg.shuffle_buffer > 0:
         ds = ds.shuffle(seed=cfg.seed, buffer_size=cfg.shuffle_buffer)
     return ds
