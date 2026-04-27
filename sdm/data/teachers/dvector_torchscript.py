@@ -1,26 +1,27 @@
 """d-Vector speaker-embedding teacher.
 
-The d-vector ships as a torchscript checkpoint paired with a ``Wav2Mel``
-front-end. We use the official VoxCeleb1-trained release from
+The d-vector ships as a torchscript checkpoint trained on log-mel input.
+We use the official VoxCeleb1-trained release from
 https://github.com/yistLin/dvector/releases (v1.1.1):
 
-* ``wav2mel.pt``                — log-mel front-end (60 dB normalize + 40-bin mel)
 * ``dvector-step250000.pt``     — 3-layer LSTM + attentive pool, 256-dim emb
 
-Both are TorchScript modules with a per-utterance API:
-    ``mel = wav2mel(wav_1d, sample_rate)``  -> ``(T, 40)``
-    ``emb = dvector.embed_utterance(mel)``  -> ``(256,)``
-
-We download them once into the HF cache (just for a stable on-disk
-location) and wrap them so :class:`DvectorTorchscriptTeacher.forward`
-keeps its batched ``(B*N, T) -> (B*N, 256)`` interface.
+The release also bundles ``wav2mel.pt`` (a torchscript Wav2Mel front-end),
+but it depends on ``torchaudio::sox_effects_apply_effects_tensor`` which
+is not registered in modern torchaudio builds (>= 2.0). Instead, we
+reimplement the front-end in pure Python — peak-normalize to -3 dB then
+``torchaudio.transforms.MelSpectrogram`` + log. This matches the TTSDS
+benchmark implementation
+(https://github.com/ttsds/ttsds/blob/main/src/ttsds/benchmarks/speaker/dvector.py)
+which uses the same parameters
+(40 mels, 25 ms / 10 ms window/hop, f_min=50 Hz).
 
 Each chunk is processed independently — d-Vector is a windowed embedding
 model, so feeding it per-chunk audio is the canonical TTSDS use. Output:
 ``(B, N_chunks, target_dim)``.
 
 The torchscript binding is loaded lazily so test environments without
-the checkpoints can still import this module. Pass
+the checkpoint can still import this module. Pass
 ``embedder``/``wav2mel`` callables for deterministic tests.
 """
 
@@ -34,26 +35,29 @@ from typing import Any, Callable
 import torch
 from torch import nn
 
-# Expects (B*N, T_samples) waveform at 16 kHz, returns (B*N, n_mels, T_frames)
-# *or* anything the embedder accepts; we don't constrain shape here because
-# real-world wav2mel/embedder pairs are tightly coupled.
+# Expects (B*N, T_samples) waveform at 16 kHz, returns the per-utterance
+# mel feature shape the embedder expects (here: (B*N, T_frames, 40)).
 Wav2MelFn = Callable[[torch.Tensor], torch.Tensor]
 # Maps the wav2mel output to embeddings of shape (B*N, target_dim).
 EmbedderFn = Callable[[torch.Tensor], torch.Tensor]
 
 
-# Pinned to the v1.1.1 release so checkpoints don't drift under us.
+# Pinned to the v1.1.1 release so the dvector checkpoint doesn't drift.
 _DVECTOR_RELEASE = "https://github.com/yistLin/dvector/releases/download/v1.1.1"
-_WAV2MEL_URL = f"{_DVECTOR_RELEASE}/wav2mel.pt"
 _DVECTOR_URL = f"{_DVECTOR_RELEASE}/dvector-step250000.pt"
+
+# Mel front-end constants from the upstream Wav2Mel definition (TTSDS copy).
+_NORM_DB = -3.0
+_FFT_WINDOW_MS = 25.0
+_FFT_HOP_MS = 10.0
+_F_MIN = 50.0
+_N_MELS = 40
 
 
 @dataclass
 class DvectorTorchscriptConfig:
-    # ``model_id`` is kept for backwards compatibility with the YAML schema
-    # but is unused for the default backend (assets are pinned to the GH
-    # release). Override it to point at a custom torchscript bundle and
-    # supply your own loader.
+    # Kept for YAML schema compatibility; the default backend ignores it
+    # because the dvector checkpoint URL is pinned in code.
     model_id: str = "yistLin/dvector"
     target_dim: int = 256
     pooled: str = "chunked"
@@ -89,34 +93,60 @@ def _download(url: str, dest: Path) -> Path:
     return dest
 
 
-def _load_default_backend(sample_rate: int) -> tuple[Wav2MelFn, EmbedderFn]:
-    """Download yistLin/dvector v1.1.1 release assets and wrap them.
+def _make_wav2mel(sample_rate: int) -> Wav2MelFn:
+    """Build the pure-Python Wav2Mel front-end.
 
-    The torchscript modules expose a *per-utterance* API:
-        ``wav2mel(wav_1d, sample_rate) -> (T, 40)``
-        ``dvector.embed_utterance(mel)  -> (256,)``
-    so we loop over the leading batch axis and stack. This is fine because
-    each chunk is ~1 s and we're CPU-bound here anyway.
+    Replicates ``torchaudio.sox_effects.apply_effects_tensor([['norm','-3']])``
+    + ``MelSpectrogram(...)`` + ``log(clamp(..., 1e-9))``. Input is assumed
+    mono and at ``sample_rate`` already (no resample step needed: the caller
+    has chunked at that rate).
+    """
+    from torchaudio.transforms import MelSpectrogram  # noqa: PLC0415
+
+    melspec = MelSpectrogram(
+        sample_rate=sample_rate,
+        n_fft=int(sample_rate * _FFT_WINDOW_MS / 1000),
+        hop_length=int(sample_rate * _FFT_HOP_MS / 1000),
+        f_min=_F_MIN,
+        n_mels=_N_MELS,
+    ).eval()
+    # Linear gain that maps peak |x|=1 to ``_NORM_DB``. Matches sox `norm -3`
+    # which scales so the new peak hits 10**(norm_db/20) of full-scale.
+    norm_target = 10.0 ** (_NORM_DB / 20.0)
+
+    @torch.no_grad()
+    def _wav2mel(audio: torch.Tensor) -> torch.Tensor:
+        # audio: (B*N, T) float32.
+        peak = audio.abs().amax(dim=-1, keepdim=True).clamp_min(1e-9)
+        wav = audio * (norm_target / peak)
+        # MelSpectrogram returns (..., n_mels, T_frames); we want (..., T, n_mels).
+        mel = melspec(wav)
+        mel = mel.transpose(-1, -2)
+        return torch.log(torch.clamp(mel, min=1e-9))
+
+    return _wav2mel
+
+
+def _load_default_backend(sample_rate: int) -> tuple[Wav2MelFn, EmbedderFn]:
+    """Build the pure-Python Wav2Mel and load the yistLin dvector torchscript.
+
+    The dvector torchscript exposes a per-utterance API:
+        ``dvector.embed_utterance(mel) -> (256,)``  with mel shaped (T, 40).
+    We loop over the leading batch axis because each chunk is ~1 s and we're
+    CPU-bound here anyway.
     """
     cache = _cache_dir()
-    wav2mel_path = _download(_WAV2MEL_URL, cache / "wav2mel.pt")
     dvector_path = _download(_DVECTOR_URL, cache / "dvector-step250000.pt")
-    wav2mel_mod = torch.jit.load(str(wav2mel_path), map_location="cpu").eval()
     dvector_mod = torch.jit.load(str(dvector_path), map_location="cpu").eval()
 
-    def _wav2mel(audio: torch.Tensor) -> torch.Tensor:
-        # audio: (B*N, T) float32. Returns (B*N, T_frames, 40) — kept as a
-        # list-of-mels would also work, but the embedder wrapper indexes
-        # this dim explicitly so the torch.stack happens in one place.
-        mels = [wav2mel_mod(wav, sample_rate) for wav in audio]
-        return torch.nn.utils.rnn.pad_sequence(mels, batch_first=True)
+    wav2mel = _make_wav2mel(sample_rate)
 
     def _embed(mels: torch.Tensor) -> torch.Tensor:
         # mels: (B*N, T_frames, 40). embed_utterance wants (T_frames, 40).
         embs = [dvector_mod.embed_utterance(m) for m in mels]
         return torch.stack(embs, dim=0)
 
-    return _wav2mel, _embed
+    return wav2mel, _embed
 
 
 class DvectorTorchscriptTeacher(nn.Module):

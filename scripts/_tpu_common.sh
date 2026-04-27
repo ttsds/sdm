@@ -57,6 +57,7 @@ uv sync --extra dev --extra tpu --extra tracking
 # overrides any drift introduced by `uv sync`.
 uv pip install \
     'torch~=2.7.0' \
+    'torchaudio~=2.7.0' \
     'torch_xla[tpu]~=2.7.0' \
     -f https://storage.googleapis.com/libtpu-releases/index.html \
     -f https://storage.googleapis.com/libtpu-wheels/index.html
