@@ -33,16 +33,56 @@ if ! command -v uv >/dev/null 2>&1; then
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
-# 4. Sync deps. `tpu` extra is a placeholder; torch_xla wheels still install
-# separately because they pin torch versions.
+# 3b. Force a Python 3.11 venv. The TPU base image ships system Python 3.10,
+# but torch_xla 2.7 wheels for libtpu are built against 3.10/3.11/3.12 only,
+# and we hit a pernicious ABI mismatch (`undefined symbol:
+# _ZNK3c1010TensorImpl39sym_is_non_overlapping_and_dense_customEv`) when uv
+# resolves a torch_xla wheel that was actually built against a newer torch
+# than our `~=2.7.0` pin. Sticking to 3.11 + explicit pinning below avoids it.
+PYBIN="${SDM_PYTHON:-python3.11}"
+if ! command -v "$PYBIN" >/dev/null 2>&1; then
+    sudo apt-get update -y && sudo apt-get install -y python3.11 python3.11-venv
+fi
+if [[ ! -d .venv ]] || ! .venv/bin/python -c 'import sys; assert sys.version_info[:2] == (3, 11)' 2>/dev/null; then
+    rm -rf .venv
+    uv venv --python "$PYBIN" .venv
+fi
+
+# 4. Sync deps. `tpu` extra is a placeholder; torch / torch_xla install in
+# the next step with explicit `~=2.7.0` pins to keep their ABIs aligned.
 uv sync --extra dev --extra tpu --extra tracking
 
-# 5. torch_xla — install if missing. Pinning to whatever torch ships in the lockfile.
-if ! uv run python -c "import torch_xla" 2>/dev/null; then
-    TORCH_VER=$(uv run python -c "import torch; print(torch.__version__.split('+')[0])")
-    uv pip install "torch~=${TORCH_VER}" torch_xla \
-        -f https://storage.googleapis.com/libtpu-releases/index.html
+# 5. torch + torch_xla — pin both to the same minor (2.7) and pull libtpu via
+# the `[tpu]` extra. Re-run unconditionally; uv pip is idempotent and this
+# overrides any drift introduced by `uv sync`.
+uv pip install \
+    'torch~=2.7.0' \
+    'torch_xla[tpu]~=2.7.0' \
+    -f https://storage.googleapis.com/libtpu-releases/index.html \
+    -f https://storage.googleapis.com/libtpu-wheels/index.html
+
+# 5b. Smoke test: import torch_xla so we fail loudly here, not 30 s into
+# the train loop.
+uv run python -c "import torch, torch_xla; print('[bootstrap] torch', torch.__version__, 'torch_xla', torch_xla.__version__)"
+
+# 5c. Teacher runtime deps. These run on the TPU host CPU (in dataloader
+# workers or the no-grad teacher pass), not on the TPU itself, so they're
+# safe to install alongside torch_xla. We install the union for all 7
+# remaining teachers — cheap, and lets the same bootstrap serve every
+# experiment without per-config branching.
+#   - phonemizer + espeak-ng: g2p_speaking_rate
+#   - pyworld:                pyworld_f0
+#   - pyannote.audio:         wespeaker_resnet34
+#   - masked_prosody_model:   mpm (git, no PyPI release)
+# transformers / huggingface-hub / soundfile / librosa are already in core.
+if ! dpkg -s espeak-ng >/dev/null 2>&1; then
+    sudo apt-get update -y && sudo apt-get install -y espeak-ng libespeak-ng1
 fi
+uv pip install \
+    phonemizer \
+    pyworld \
+    'pyannote.audio>=3.1' \
+    'masked_prosody_model @ git+https://github.com/MiniXC/masked_prosody_model'
 
 # 6. XLA + wandb env
 export PJRT_DEVICE=TPU

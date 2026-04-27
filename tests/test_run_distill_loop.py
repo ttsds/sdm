@@ -20,10 +20,10 @@ from sdm.train.run_distill import (
 
 
 def test_load_config_dry_run_path():
-    cfg = load_config("configs/finetune_xlsr.yaml")
-    assert cfg.experiment == "sdm-xlsr"
+    cfg = load_config("configs/finetune_xlsr_fairseq.yaml")
+    assert cfg.experiment == "sdm-xlsr-fairseq"
     assert cfg.teacher.kind == "hf_ssl"
-    assert cfg.train.batch_size == 16
+    assert cfg.backbone.kind == "fairseq_w2v2"
 
 
 def test_masked_mse_zeroes_out_padding():
@@ -72,7 +72,7 @@ class _FakeTeacher(nn.Module):
         super().__init__()
         self.target_dim = target_dim
 
-    def __call__(self, audio, *, chunk_mask=None):  # type: ignore[override]
+    def __call__(self, audio, *, chunk_mask=None, **_):  # type: ignore[override]
         b, n, _ = audio.shape
         out = torch.zeros(b, n, self.target_dim, dtype=audio.dtype, device=audio.device)
         if chunk_mask is not None:

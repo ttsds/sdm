@@ -1,0 +1,54 @@
+# sdm-speaking-rate: distill phonemes-per-second derived from the dataset
+# transcript via grapheme-to-phoneme (espeak-ng / phonemizer). Replaces the
+# Allosaurus-based teacher: Emilia ships transcripts so we no longer need
+# the offline phone-recognizer cache, and the target is exact phones/sec
+# rather than a recognizer estimate.
+
+experiment: sdm-speaking-rate
+
+backbone:
+  kind: fairseq_w2v2
+  model_id: facebook/wav2vec2-xls-r-300m
+  hidden_size: 1024
+  layer_idx: -1
+
+teacher:
+  kind: g2p_speaking_rate
+  in_loop: true                   # cheap CPU compute, runs alongside the step
+  cache_dir: null
+  target_dim: 1
+  pooled: chunked                 # broadcast utterance rate across valid chunks
+  target_layernorm: false         # 1-D scalar; LN would zero it out
+  chunk_seconds: 1.0
+  default_language: en
+
+data:
+  repo_id: amphion/Emilia-Dataset
+  split: train
+  streaming: true
+  shuffle_buffer: 10000
+  seed: 0
+  fraction: 0.1
+  sample_rate: 16000
+  chunk_seconds: 1.0
+  max_chunks: 32
+  num_workers: 4                  # phonemizer runs in worker procs
+
+train:
+  batch_size: 32
+  grad_accum: 1
+  lr: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 1000
+  total_steps: 10000
+  log_every: 50
+  ckpt_every: 2000
+  ckpt_dir: gs://sdm-ckpts/sdm-speaking-rate
+  resume_from_latest: true
+  fsdp: false
+  seed: 0
+  wandb:
+    enabled: true
+    project: sdm
+    run_name: sdm-speaking-rate-10pct
+    tags: [finetune, multilingual, 10pct, v6e-8, prosody]

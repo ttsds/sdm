@@ -35,9 +35,9 @@ train:
   lr: 5.0e-5
   weight_decay: 0.01
   warmup_steps: 1000
-  total_steps: 30000             # ~10% of Emilia at global batch ~128
-  log_every: 1
-  ckpt_every: 5000
+  total_steps: 10000             # convergence is mostly finished by ~10k
+  log_every: 50
+  ckpt_every: 2000
   ckpt_dir: gs://sdm-ckpts/sdm-xlsr
   resume_from_latest: true
   fsdp: false

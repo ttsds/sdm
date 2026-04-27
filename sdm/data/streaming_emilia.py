@@ -355,6 +355,26 @@ def _extract_language(record: dict[str, Any]) -> str | None:
     return None
 
 
+def _extract_text(record: dict[str, Any]) -> str | None:
+    """Pull the transcript string out of a record, if available.
+
+    Emilia WebDataset shards stash the transcript under the ``json`` metadata
+    sidecar (key ``text``). HF parquet builds expose it as a top-level
+    ``text`` column. Either form is accepted; missing/empty transcripts
+    return ``None`` so downstream teachers can decide how to handle them.
+    """
+    for key in ("text", "transcript", "transcription", "sentence"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    meta = _record_metadata(record)
+    for key in ("text", "transcript", "transcription", "sentence"):
+        value = meta.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 def iter_chunks(
     cfg: EmiliaConfig,
     *,
@@ -384,6 +404,7 @@ def iter_chunks(
             "n_chunks": n,
             "id": _extract_id(record),
             "language": _extract_language(record),
+            "text": _extract_text(record),
         }
         emitted += 1
         if take is not None and emitted >= take:
@@ -419,6 +440,7 @@ def collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
         "n_chunks": n_chunks,
         "ids": [b["id"] for b in batch],
         "languages": [b["language"] for b in batch],
+        "texts": [b.get("text") for b in batch],
     }
 
 

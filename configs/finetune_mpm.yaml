@@ -1,12 +1,16 @@
-# sdm-mpm: distill Masked Prosody Model layer 7. English-only teacher; we
-# accept the language bias when training on the multilingual stream.
+# sdm-mpm: distill Masked Prosody Model layer 7 into XLS-R 300M. English-only
+# teacher; we accept the language bias when training on the multilingual stream.
 # MPM expects 22050 Hz audio -- handled inside the teacher wrapper.
+# MPM is here: https://huggingface.co/cdminix/masked_prosody_model
+# TODO: implement sdm/data/teachers/mpm.py and register the `mpm` kind in
+# sdm/data/teachers/__init__.py.
 
 experiment: sdm-mpm
 
 backbone:
-  model_id: utter-project/mHuBERT-147
-  hidden_size: 768
+  kind: fairseq_w2v2
+  model_id: facebook/wav2vec2-xls-r-300m
+  hidden_size: 1024
   layer_idx: -1
 
 teacher:
@@ -15,8 +19,12 @@ teacher:
   layer: 7
   in_loop: true
   cache_dir: null
-  target_dim: 256                # confirm against MPM hidden size at first run
+  target_dim: 256                # MPM filter_size (Conformer hidden dim)
   pooled: chunked                # mean-pool MPM frames within each 1s chunk
+  target_layernorm: true
+  sample_rate: 16000
+  teacher_sample_rate: 22050
+  chunk_seconds: 1.0
 
 data:
   repo_id: amphion/Emilia-Dataset
@@ -35,9 +43,9 @@ train:
   lr: 5.0e-5
   weight_decay: 0.01
   warmup_steps: 1000
-  total_steps: 30000
+  total_steps: 10000
   log_every: 50
-  ckpt_every: 5000
+  ckpt_every: 2000
   ckpt_dir: gs://sdm-ckpts/sdm-mpm
   resume_from_latest: true
   fsdp: false

@@ -1,12 +1,15 @@
-# sdm-mwhisper: distill multilingual Whisper-small encoder, per-chunk mean.
+# sdm-mwhisper: distill multilingual Whisper-small encoder (per-chunk mean) into XLS-R 300M.
 # Note: deviates from TTSDS's 1500-d cross-layer-and-hidden-mean trick; we use
 # the conventional encoder hidden states pooled per chunk.
+# TODO: implement sdm/data/teachers/whisper_encoder.py and register the
+# `whisper_encoder` kind in sdm/data/teachers/__init__.py.
 
 experiment: sdm-mwhisper
 
 backbone:
-  model_id: utter-project/mHuBERT-147
-  hidden_size: 768
+  kind: fairseq_w2v2
+  model_id: facebook/wav2vec2-xls-r-300m
+  hidden_size: 1024
   layer_idx: -1
 
 teacher:
@@ -16,6 +19,9 @@ teacher:
   cache_dir: null
   target_dim: 768                # Whisper-small encoder hidden size
   pooled: chunked
+  target_layernorm: true
+  chunk_seconds: 1.0
+  sample_rate: 16000
 
 data:
   repo_id: amphion/Emilia-Dataset
@@ -34,9 +40,9 @@ train:
   lr: 5.0e-5
   weight_decay: 0.01
   warmup_steps: 1000
-  total_steps: 30000
+  total_steps: 10000
   log_every: 50
-  ckpt_every: 5000
+  ckpt_every: 2000
   ckpt_dir: gs://sdm-ckpts/sdm-mwhisper
   resume_from_latest: true
   fsdp: false

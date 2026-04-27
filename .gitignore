@@ -12,6 +12,7 @@ venv/
 .mypy_cache/
 .coverage
 htmlcov/
+pytest_*.log
 
 # sdm artefacts
 checkpoints/
@@ -28,3 +29,4 @@ teacher_cache/
 .vscode/
 *.swp
 .DS_Store
+.tpu/

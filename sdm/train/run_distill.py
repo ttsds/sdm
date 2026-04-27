@@ -35,6 +35,14 @@ class TeacherConfig:
     layer: int | None = None
     cache_dir: str | None = None
     target_layernorm: bool = True
+    # Optional, teacher-specific extras (e.g. g2p speaking-rate, pyworld_f0).
+    chunk_seconds: float | None = None
+    sample_rate: int | None = None
+    default_language: str | None = None
+    frame_period_ms: float | None = None
+    f0_floor: float | None = None
+    f0_ceil: float | None = None
+    teacher_sample_rate: int | None = None
 
 
 @dataclass
@@ -116,7 +124,11 @@ def _build_loader(cfg: DistillConfig) -> DataLoader:
 
     stream_cfg = _to_streaming_emilia_cfg(cfg.data)
     ds = StreamingEmiliaDataset(stream_cfg)
-    teacher_id = cfg.teacher.model_id if cfg.teacher.kind == "hf_ssl" else None
+    teacher_id = (
+        cfg.teacher.model_id
+        if cfg.teacher.kind in {"hf_ssl", "hf_ctc"}
+        else None
+    )
     student_id = (
         cfg.backbone.model_id
         if cfg.backbone.kind in {"hf", "fairseq_w2v2"}
@@ -337,11 +349,16 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
         chunk_mask = batch["chunk_mask"]
         teacher_audio = batch.get("teacher_audio", audio)
         student_audio = batch.get("student_audio", audio)
+        teacher_ctx = {
+            "texts": batch.get("texts"),
+            "languages": batch.get("languages"),
+            "n_chunks": batch.get("n_chunks"),
+        }
 
         if verbose and xla_utils.is_master():
             t0 = time.perf_counter()
         with torch.no_grad():
-            target = teacher(teacher_audio, chunk_mask=chunk_mask)
+            target = teacher(teacher_audio, chunk_mask=chunk_mask, **teacher_ctx)
         if verbose and xla_utils.is_master():
             xla_utils.mark_step()  # force materialization for accurate timing
             t_teacher = time.perf_counter() - t0

@@ -15,9 +15,10 @@ GCP project: `ml-edinburgh`. All slices are managed via
 | `sdm-teacher-cache` | 64 | v5e | europe-west4-b | spot | Teacher cache extraction (4 factors in parallel) |
 | `sdm-finetune-extra` | 64 | v5e | us-central1-a | spot | Speaker / prosody finetunes (post-port); eval sweeps |
 
-Roles are assigned in `/memories/session/plan.md`. Image baking, GCS layout
-and resume strategy live in [scripts/launch_tpu_pretrain.sh](scripts/launch_tpu_pretrain.sh)
-and [sdm/train/xla_utils.py](sdm/train/xla_utils.py).
+Image baking and resume strategy live in
+[scripts/run_finetune.sh](scripts/run_finetune.sh),
+[scripts/_tpu_common.sh](scripts/_tpu_common.sh), and
+[sdm/train/xla_utils.py](sdm/train/xla_utils.py).
 
 ## GCS layout
 

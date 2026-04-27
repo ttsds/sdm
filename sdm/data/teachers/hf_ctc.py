@@ -1,9 +1,10 @@
-"""HuggingFace SSL teacher (e.g. XLS-R / wav2vec2 family).
+"""HuggingFace CTC teacher (e.g. wav2vec2 ASR encoder).
 
-Loads ``AutoModel`` for the configured ``model_id`` and extracts a fixed
-hidden layer. The teacher is run on the full chunk-flattened batch with
-``output_hidden_states=True``; the per-chunk frame outputs are mean-pooled to
-yield ``(B, N_chunks, hidden_size)``.
+Loads ``AutoModelForCTC`` for the configured ``model_id`` and extracts a
+fixed encoder hidden layer. Mirrors :class:`HfSslTeacher` but with a CTC
+head instead of the bare SSL backbone — TTSDS2 uses the *encoder* hidden
+states of an ASR-finetuned wav2vec2 (intelligibility factor), so we pull
+the same intermediate layer.
 """
 
 from __future__ import annotations
@@ -18,33 +19,39 @@ from sdm.dotenv import hf_token_kwargs
 
 
 @dataclass
-class HfSslConfig:
+class HfCtcConfig:
     model_id: str
-    layer: int
     target_dim: int
+    layer: int = -1
     pooled: str = "chunked"
     target_layernorm: bool = True
 
 
-def _coerce_config(cfg: Any) -> HfSslConfig:
-    if isinstance(cfg, HfSslConfig):
+def _coerce_config(cfg: Any) -> HfCtcConfig:
+    if isinstance(cfg, HfCtcConfig):
         return cfg
     fields = ("model_id", "layer", "target_dim", "pooled", "target_layernorm")
     if hasattr(cfg, "model_id"):
-        return HfSslConfig(**{f: getattr(cfg, f) for f in fields if hasattr(cfg, f)})
-    return HfSslConfig(**{f: cfg[f] for f in fields if f in cfg})
+        return HfCtcConfig(**{f: getattr(cfg, f) for f in fields if hasattr(cfg, f) and getattr(cfg, f) is not None})
+    return HfCtcConfig(**{f: cfg[f] for f in fields if f in cfg})
 
 
-class HfSslTeacher(nn.Module):
-    """In-loop SSL teacher returning ``(B, N_chunks, hidden_size)`` features."""
+class HfCtcTeacher(nn.Module):
+    """In-loop CTC encoder teacher returning ``(B, N_chunks, hidden_size)``."""
 
-    def __init__(self, cfg: Any, *, device: torch.device | str = "cpu", model: nn.Module | None = None) -> None:
+    def __init__(
+        self,
+        cfg: Any,
+        *,
+        device: torch.device | str = "cpu",
+        model: nn.Module | None = None,
+    ) -> None:
         super().__init__()
         self.cfg = _coerce_config(cfg)
         if model is None:
-            from transformers import AutoModel  # type: ignore
+            from transformers import AutoModelForCTC  # type: ignore
 
-            model = AutoModel.from_pretrained(self.cfg.model_id, **hf_token_kwargs())
+            model = AutoModelForCTC.from_pretrained(self.cfg.model_id, **hf_token_kwargs())
         self.model = model
         self.layer = int(self.cfg.layer)
         self.target_dim = int(self.cfg.target_dim)
@@ -76,10 +83,6 @@ class HfSslTeacher(nn.Module):
             )
         features = pooled.reshape(b, n, d)
         if self.target_layernorm:
-            # Standard fix for distilling from an unnormalized intermediate
-            # SSL hidden state (HuBERT/data2vec/BEATs all do this): apply a
-            # parameter-free LayerNorm over the feature axis so outlier
-            # channels don't dominate the MSE loss / blow up gradients.
             features = torch.nn.functional.layer_norm(features, (d,))
         if chunk_mask is not None:
             features = features * chunk_mask.unsqueeze(-1).to(features.dtype)
@@ -95,4 +98,4 @@ class HfSslTeacher(nn.Module):
         return self.forward(audio, chunk_mask=chunk_mask, **ctx)
 
 
-__all__ = ["HfSslConfig", "HfSslTeacher"]
+__all__ = ["HfCtcConfig", "HfCtcTeacher"]
