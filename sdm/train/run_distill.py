@@ -117,8 +117,10 @@ def _build_loader(cfg: DistillConfig) -> DataLoader:
     stream_cfg = _to_streaming_emilia_cfg(cfg.data)
     ds = StreamingEmiliaDataset(stream_cfg)
     teacher_id = cfg.teacher.model_id if cfg.teacher.kind == "hf_ssl" else None
+    student_id = cfg.backbone.model_id
     collate_fn = make_collate(
         teacher_processor_id=teacher_id,
+        student_processor_id=student_id,
         sample_rate=cfg.data.sample_rate,
     )
     return DataLoader(
@@ -330,6 +332,7 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
         audio = batch["audio"]
         chunk_mask = batch["chunk_mask"]
         teacher_audio = batch.get("teacher_audio", audio)
+        student_audio = batch.get("student_audio", audio)
 
         if verbose and xla_utils.is_master():
             t0 = time.perf_counter()
@@ -340,7 +343,7 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             t_teacher = time.perf_counter() - t0
             t0 = time.perf_counter()
 
-        pred = student(audio)
+        pred = student(student_audio)
         if verbose and xla_utils.is_master():
             loss_terms = _masked_cos_l1_terms(pred, target, chunk_mask)
             loss = loss_terms["loss"] / cfg.train.grad_accum

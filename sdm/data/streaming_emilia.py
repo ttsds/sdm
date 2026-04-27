@@ -425,51 +425,52 @@ def collate(batch: list[dict[str, Any]]) -> dict[str, Any]:
 def make_collate(
     *,
     teacher_processor_id: str | None = None,
+    student_processor_id: str | None = None,
     sample_rate: int = 16000,
 ) -> Callable[[list[dict[str, Any]]], dict[str, Any]]:
     """Build a collate fn that optionally runs an HF AutoFeatureExtractor.
 
     When ``teacher_processor_id`` is set, the resulting collate emits an extra
     ``teacher_audio`` tensor of the same shape as ``audio`` (B, N, T) but
-    pre-processed by the teacher's HF feature extractor. This is the canonical
-    HF input path: e.g. for ``facebook/wav2vec2-xls-r-300m`` the extractor
-    applies per-clip zero-mean / unit-variance normalization, which is required
-    by ``feat_extract_norm="layer"`` models. For ``mHuBERT-147`` the extractor
-    is a no-op since ``do_normalize=False``.
+    pre-processed by the teacher's HF feature extractor. Likewise,
+    ``student_processor_id`` produces a ``student_audio`` tensor for the
+    student backbone. This is the canonical HF input path: for
+    ``facebook/wav2vec2-xls-r-300m`` the extractor applies per-clip zero-mean
+    / unit-variance normalization, which is required by
+    ``feat_extract_norm="layer"`` models. For ``mHuBERT-147`` the extractor is
+    a no-op since ``do_normalize=False``.
 
-    The student backbone keeps consuming raw ``audio`` directly, matching its
-    own processor's behaviour (mHuBERT: ``do_normalize=False``).
+    Each side independently uses its own processor; the raw ``audio`` tensor
+    is also kept for downstream consumers that prefer unnormalized input.
     """
 
-    if teacher_processor_id is None:
+    if teacher_processor_id is None and student_processor_id is None:
         return collate
 
     from transformers import AutoFeatureExtractor  # type: ignore
 
-    extractor = AutoFeatureExtractor.from_pretrained(
-        teacher_processor_id, **hf_token_kwargs()
-    )
+    def _make_extractor(model_id: str | None):
+        if model_id is None:
+            return None
+        return AutoFeatureExtractor.from_pretrained(model_id, **hf_token_kwargs())
 
-    def _collate_with_processor(batch: list[dict[str, Any]]) -> dict[str, Any]:
-        out = collate(batch)
-        audio = out["audio"]  # (B, N, T) float32 cpu
-        chunk_mask = out["chunk_mask"]  # (B, N) bool
+    teacher_extractor = _make_extractor(teacher_processor_id)
+    student_extractor = _make_extractor(student_processor_id)
+
+    def _process(extractor, audio: torch.Tensor, chunk_mask: torch.Tensor) -> torch.Tensor:
         b, n, t = audio.shape
+        do_normalize = bool(getattr(extractor, "do_normalize", False))
+        if not do_normalize:
+            return audio.to(torch.float32)
 
         # XLS-R / wav2vec2 with feat_extract_norm="layer" expects per-UTTERANCE
         # zero-mean / unit-variance normalization. The HF AutoFeatureExtractor
         # normalizes per element of its input list, so feeding (B*N) chunks
         # would normalize each 1-second slice independently — this collapses
-        # near-silent chunks to large z-scores and explodes the teacher's
-        # outlier features. Instead, run the extractor once per utterance on
-        # only the valid (unpadded) samples, then re-chunk and zero-pad.
-        do_normalize = bool(getattr(extractor, "do_normalize", False))
-        if not do_normalize:
-            # Cheap path: extractor is a no-op, just copy raw audio.
-            out["teacher_audio"] = audio.to(torch.float32)
-            return out
-
-        teacher_audio = torch.zeros_like(audio, dtype=torch.float32)
+        # near-silent chunks to large z-scores and explodes outlier features.
+        # Instead, run the extractor once per utterance on only the valid
+        # (unpadded) samples, then re-chunk and zero-pad.
+        normed_audio = torch.zeros_like(audio, dtype=torch.float32)
         for i in range(b):
             valid_n = int(chunk_mask[i].sum().item())
             if valid_n <= 0:
@@ -482,8 +483,17 @@ def make_collate(
                 padding=False,
             )
             normed = processed["input_values"].reshape(-1).to(torch.float32)
-            teacher_audio[i, :valid_n] = normed.reshape(valid_n, t)
-        out["teacher_audio"] = teacher_audio
+            normed_audio[i, :valid_n] = normed.reshape(valid_n, t)
+        return normed_audio
+
+    def _collate_with_processor(batch: list[dict[str, Any]]) -> dict[str, Any]:
+        out = collate(batch)
+        audio = out["audio"]  # (B, N, T) float32 cpu
+        chunk_mask = out["chunk_mask"]  # (B, N) bool
+        if teacher_extractor is not None:
+            out["teacher_audio"] = _process(teacher_extractor, audio, chunk_mask)
+        if student_extractor is not None:
+            out["student_audio"] = _process(student_extractor, audio, chunk_mask)
         return out
 
     return _collate_with_processor

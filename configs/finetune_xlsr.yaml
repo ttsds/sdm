@@ -1,20 +1,20 @@
-# sdm-xlsr: distill XLSR-53 generic, layer 8 hidden states, per-chunk mean.
+# sdm-xlsr: distill XLS-R 300M (student) against mHuBERT-147 layer 8 (teacher).
 # In-the-loop teacher (HF AutoModel on TPU, frozen, bf16, no grad).
 
 experiment: sdm-xlsr
 
 backbone:
-  model_id: utter-project/mHuBERT-147
-  hidden_size: 768
+  model_id: facebook/wav2vec2-xls-r-300m
+  hidden_size: 1024
   layer_idx: -1                  # backbone layer fed to head and used for probes
 
 teacher:
   kind: hf_ssl                   # "hf_ssl" -> AutoModel + processor + layer index
-  model_id: facebook/wav2vec2-xls-r-300m
+  model_id: utter-project/mHuBERT-147
   layer: 8
   in_loop: true                  # run teacher on TPU each step
   cache_dir: null
-  target_dim: 1024               # XLS-R hidden size
+  target_dim: 768                # mHuBERT-147 hidden size
   pooled: chunked                # mean-pool teacher frames within each 1s chunk
   target_layernorm: true         # parameter-free LN over feature axis (HuBERT/data2vec-style)
 
