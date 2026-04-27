@@ -42,11 +42,19 @@ def _coerce_config(cfg: Any) -> WespeakerResnet34Config:
 
 
 def _load_pyannote_wespeaker(model_id: str) -> nn.Module:
-    """Load the bare embedding nn.Module from a pyannote checkpoint."""
+    """Load the bare embedding nn.Module from a pyannote checkpoint.
+
+    pyannote.audio renamed ``use_auth_token`` to ``token`` somewhere
+    around 3.1; try the new spelling first and fall back for older
+    installs.
+    """
     from pyannote.audio import Model  # type: ignore
 
     token = hf_token_kwargs().get("token")
-    return Model.from_pretrained(model_id, use_auth_token=token).eval()
+    try:
+        return Model.from_pretrained(model_id, token=token).eval()
+    except TypeError:
+        return Model.from_pretrained(model_id, use_auth_token=token).eval()
 
 
 class WespeakerResnet34Teacher(nn.Module):
