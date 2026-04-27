@@ -117,7 +117,11 @@ def _build_loader(cfg: DistillConfig) -> DataLoader:
     stream_cfg = _to_streaming_emilia_cfg(cfg.data)
     ds = StreamingEmiliaDataset(stream_cfg)
     teacher_id = cfg.teacher.model_id if cfg.teacher.kind == "hf_ssl" else None
-    student_id = cfg.backbone.model_id if cfg.backbone.kind == "hf" else None
+    student_id = (
+        cfg.backbone.model_id
+        if cfg.backbone.kind in {"hf", "fairseq_w2v2"}
+        else None
+    )
     collate_fn = make_collate(
         teacher_processor_id=teacher_id,
         student_processor_id=student_id,

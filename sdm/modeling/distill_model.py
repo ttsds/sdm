@@ -247,6 +247,16 @@ def build_backbone(cfg: BackboneConfig, *, target_dim: int | None = None) -> Dis
     if cfg.kind == "tiny":
         backbone = TinyAudioBackbone(cfg)
         return DistillModel(backbone, layer_idx=cfg.layer_idx, target_dim=target_dim)
+    if cfg.kind == "fairseq_w2v2":
+        from sdm.modeling.wav2vec2_fairseq import load_xlsr_from_hf
+
+        backbone = load_xlsr_from_hf(cfg.model_id)
+        model_hidden = int(backbone.config.hidden_size)
+        if model_hidden != cfg.hidden_size:
+            raise ValueError(
+                f"backbone hidden_size mismatch for {cfg.model_id}: config={cfg.hidden_size} model={model_hidden}"
+            )
+        return DistillModel(backbone, layer_idx=cfg.layer_idx, target_dim=target_dim)
     if cfg.kind != "hf":
         raise ValueError(f"unknown backbone kind: {cfg.kind!r}")
     backbone = AutoModel.from_pretrained(cfg.model_id, **hf_token_kwargs())
