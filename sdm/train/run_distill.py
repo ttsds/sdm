@@ -163,55 +163,58 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tens
     return diff.pow(2).sum() / torch.clamp(denom, min=1.0)
 
 
-def _masked_mse_ln_target(
+def _masked_cos_l1(
     pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tensor
 ) -> torch.Tensor:
-    """Lean masked MSE used in the hot training path.
+    """Lean cosine + L1 distillation loss used in the hot training path.
 
-    LayerNorm is applied to the target only (parameter-free, over the feature
-    axis); the prediction is left raw so that runaway student magnitudes
-    surface as a large loss instead of being silently normalized away.
+    For every masked token position computes
+    ``0.5 * (1 - cos(pred, target)) + 0.5 * mean_d |pred - target|`` and
+    averages over masked positions. The cosine term is direction-only; the
+    L1 term keeps magnitudes anchored to the teacher.
     """
     pred_f = pred.float()
     target_f = target.float()
-    d = pred_f.shape[-1]
-    target_n = torch.nn.functional.layer_norm(target_f, (d,))
-    mask = chunk_mask.to(pred_f.dtype).unsqueeze(-1)
-    diff = (pred_f - target_n) * mask
-    denom = mask.sum() * d
-    return diff.pow(2).sum() / torch.clamp(denom, min=1.0)
+    mask = chunk_mask.to(pred_f.dtype)
+    cos = torch.nn.functional.cosine_similarity(pred_f, target_f, dim=-1, eps=1e-6)
+    cos_per_token = (1.0 - cos) * mask
+    l1_per_token = (pred_f - target_f).abs().mean(dim=-1) * mask
+    denom = torch.clamp(mask.sum(), min=1.0)
+    cos_loss = cos_per_token.sum() / denom
+    l1_loss = l1_per_token.sum() / denom
+    return 0.5 * cos_loss + 0.5 * l1_loss
 
 
-def _masked_mse_terms(
+def _masked_cos_l1_terms(
     pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tensor
 ) -> dict[str, torch.Tensor]:
-    """Diagnostic version of the masked MSE used only when ``--verbose``.
+    """Diagnostic version of :func:`_masked_cos_l1` for ``--verbose`` runs.
 
-    Applies parameter-free LayerNorm to the target only (matching the hot
-    path in :func:`_masked_mse_ln_target`) and returns every intermediate
-    tensor so the caller can print stats. The prediction is left raw on
-    purpose: normalizing it would mask student blow-ups.
+    Returns each intermediate so the caller can print stats. The returned
+    ``loss`` matches what the hot path produces.
     """
     pred_f = pred.float()
     target_f = target.float()
-    d = pred_f.shape[-1]
-    target_n = torch.nn.functional.layer_norm(target_f, (d,))
-    mask = chunk_mask.to(pred_f.dtype).unsqueeze(-1)
-    raw_diff = pred_f - target_n
-    masked_diff = raw_diff * mask
-    sq = masked_diff.pow(2)
+    mask = chunk_mask.to(pred_f.dtype)
+    cos = torch.nn.functional.cosine_similarity(pred_f, target_f, dim=-1, eps=1e-6)
+    cos_per_token = (1.0 - cos) * mask
+    abs_diff = (pred_f - target_f).abs()
+    l1_per_token = abs_diff.mean(dim=-1) * mask
     mask_sum = mask.sum()
-    denom = mask_sum * d
-    loss = sq.sum() / torch.clamp(denom, min=1.0)
+    denom = torch.clamp(mask_sum, min=1.0)
+    cos_loss = cos_per_token.sum() / denom
+    l1_loss = l1_per_token.sum() / denom
+    loss = 0.5 * cos_loss + 0.5 * l1_loss
     return {
         "pred": pred_f,
         "target": target_f,
-        "target_n": target_n,
-        "raw_diff": raw_diff,
-        "masked_diff": masked_diff,
-        "sq": sq,
+        "abs_diff": abs_diff,
+        "cos": cos,
+        "cos_per_token": cos_per_token,
+        "l1_per_token": l1_per_token,
+        "cos_loss": cos_loss,
+        "l1_loss": l1_loss,
         "mask_sum": mask_sum,
-        "denom": denom,
         "loss": loss,
     }
 
@@ -339,11 +342,11 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
 
         pred = student(audio)
         if verbose and xla_utils.is_master():
-            loss_terms = _masked_mse_terms(pred, target, chunk_mask)
+            loss_terms = _masked_cos_l1_terms(pred, target, chunk_mask)
             loss = loss_terms["loss"] / cfg.train.grad_accum
         else:
             loss_terms = None
-            loss = _masked_mse_ln_target(pred, target, chunk_mask) / cfg.train.grad_accum
+            loss = _masked_cos_l1(pred, target, chunk_mask) / cfg.train.grad_accum
         loss.backward()
         if verbose and xla_utils.is_master():
             xla_utils.mark_step()
@@ -397,13 +400,14 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
                 print("[verbose] " + _stats_for_debug("chunk_mask", chunk_mask))
                 print("[verbose] " + _stats_for_debug("target", loss_terms["target"]))
                 print("[verbose] " + _stats_for_debug("pred", loss_terms["pred"]))
-                print("[verbose] " + _stats_for_debug("target_n", loss_terms["target_n"]))
-                print("[verbose] " + _stats_for_debug("raw_diff", loss_terms["raw_diff"]))
-                print("[verbose] " + _stats_for_debug("masked_diff", loss_terms["masked_diff"]))
-                print("[verbose] " + _stats_for_debug("sq", loss_terms["sq"]))
+                print("[verbose] " + _stats_for_debug("abs_diff", loss_terms["abs_diff"]))
+                print("[verbose] " + _stats_for_debug("cos", loss_terms["cos"]))
+                print("[verbose] " + _stats_for_debug("cos_per_token", loss_terms["cos_per_token"]))
+                print("[verbose] " + _stats_for_debug("l1_per_token", loss_terms["l1_per_token"]))
                 print(
                     f"[verbose] mask_sum={float(loss_terms['mask_sum'].detach().cpu()):.4g} "
-                    f"denom={float(loss_terms['denom'].detach().cpu()):.4g}"
+                    f"cos_loss={float(loss_terms['cos_loss'].detach().cpu()):.4g} "
+                    f"l1_loss={float(loss_terms['l1_loss'].detach().cpu()):.4g}"
                 )
                 print("[verbose] " + _stats_for_debug("loss", loss))
                 if grad_norm is not None:
