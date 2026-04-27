@@ -130,10 +130,13 @@ def _make_wav2mel(sample_rate: int) -> Wav2MelFn:
 def _load_default_backend(sample_rate: int) -> tuple[Wav2MelFn, EmbedderFn]:
     """Build the pure-Python Wav2Mel and load the yistLin dvector torchscript.
 
-    The dvector torchscript exposes a per-utterance API:
-        ``dvector.embed_utterance(mel) -> (256,)``  with mel shaped (T, 40).
-    We loop over the leading batch axis because each chunk is ~1 s and we're
-    CPU-bound here anyway.
+    The dvector torchscript exposes both a per-utterance API
+    (``embed_utterance(mel)``) and a batched ``forward(inputs)`` accepting
+    ``(B, T_frames, 40)`` and returning ``(B, 256)``. We use the batched
+    path because the per-utterance loop is serial-on-CPU and would
+    dominate step time (B*N ~= 128 LSTM calls per step on a v6e-8 chip).
+    Chunks are 1 s = 100 frames, well below the model's ``seg_len=160``
+    threshold, so the segmentation branch in ``embed_utterance`` is moot.
     """
     cache = _cache_dir()
     dvector_path = _download(_DVECTOR_URL, cache / "dvector-step250000.pt")
@@ -142,9 +145,8 @@ def _load_default_backend(sample_rate: int) -> tuple[Wav2MelFn, EmbedderFn]:
     wav2mel = _make_wav2mel(sample_rate)
 
     def _embed(mels: torch.Tensor) -> torch.Tensor:
-        # mels: (B*N, T_frames, 40). embed_utterance wants (T_frames, 40).
-        embs = [dvector_mod.embed_utterance(m) for m in mels]
-        return torch.stack(embs, dim=0)
+        # mels: (B*N, T_frames, 40). LSTMDvector.forward already L2-normalises.
+        return dvector_mod(mels)
 
     return wav2mel, _embed
 
