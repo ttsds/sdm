@@ -34,8 +34,8 @@ data:
   num_workers: 8                 # CPU procs that compute F0 keep up with TPU
 
 train:
-  batch_size: 32                 # tiny target -> larger batch fits comfortably
-  grad_accum: 1
+  batch_size: 4                  # tiny target -> larger batch fits comfortably
+  grad_accum: 4
   lr: 5.0e-5
   weight_decay: 0.01
   warmup_steps: 1000

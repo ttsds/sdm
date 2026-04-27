@@ -30,8 +30,8 @@ data:
   max_chunks: 32                 # 32s of audio max -- truncate longer
 
 train:
-  batch_size: 16                 # per-chip
-  grad_accum: 1
+  batch_size: 4                  # per-chip
+  grad_accum: 4
   lr: 5.0e-5
   weight_decay: 0.01
   warmup_steps: 1000
