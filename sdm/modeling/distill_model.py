@@ -85,12 +85,42 @@ class DistillModel(nn.Module):
         return self.head(encoded)
 
 
+def _strip_pos_conv_weight_norm(backbone: nn.Module) -> None:
+    """Bake out ``weight_norm`` on the positional convolution.
+
+    HuBERT/Wav2Vec2 wrap ``pos_conv_embed.conv`` in ``weight_norm`` which
+    reparameterises ``weight = weight_v * weight_g / ||weight_v||``. The
+    backward pass divides by ``||weight_v||``; on bf16 XLA this routinely
+    produces NaN gradients (the well-known XLA Wav2Vec2 NaN). Folding the
+    parametrization into a plain ``Conv1d.weight`` is numerically a no-op at
+    load time and removes the offending divide entirely.
+    """
+    encoder = getattr(backbone, "encoder", None)
+    pos = getattr(encoder, "pos_conv_embed", None) if encoder is not None else None
+    conv = getattr(pos, "conv", None) if pos is not None else None
+    if conv is None:
+        return
+    # New parametrizations API.
+    try:
+        from torch.nn.utils import parametrize  # type: ignore[attr-defined]
+
+        if parametrize.is_parametrized(conv, "weight"):
+            parametrize.remove_parametrizations(conv, "weight", leave_parametrized=True)
+            return
+    except Exception:
+        pass
+    # Legacy weight_norm API.
+    if hasattr(conv, "weight_g") and hasattr(conv, "weight_v"):
+        torch.nn.utils.remove_weight_norm(conv, name="weight")
+
+
 def build_backbone(cfg: BackboneConfig, *, target_dim: int | None = None) -> DistillModel:
     backbone = AutoModel.from_pretrained(cfg.model_id, **hf_token_kwargs())
     if cfg.apply_spec_augment is not None and hasattr(backbone.config, "apply_spec_augment"):
         backbone.config.apply_spec_augment = bool(cfg.apply_spec_augment)
     if cfg.layerdrop is not None and hasattr(backbone.config, "layerdrop"):
         backbone.config.layerdrop = float(cfg.layerdrop)
+    _strip_pos_conv_weight_norm(backbone)
     model_hidden = int(backbone.config.hidden_size)
     if model_hidden != cfg.hidden_size:
         raise ValueError(
@@ -107,7 +137,9 @@ def load_backbone(
 ) -> DistillModel:
     checkpoint = torch.load(Path(path), map_location="cpu")
     state = checkpoint.get("model", checkpoint)
-    model = DistillModel(AutoModel.from_pretrained(model_id, **hf_token_kwargs()), layer_idx=layer_idx)
+    backbone = AutoModel.from_pretrained(model_id, **hf_token_kwargs())
+    _strip_pos_conv_weight_norm(backbone)
+    model = DistillModel(backbone, layer_idx=layer_idx)
     model.load_state_dict(state, strict=False)
     model.eval()
     return model
