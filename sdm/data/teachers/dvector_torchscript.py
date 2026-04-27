@@ -171,7 +171,13 @@ class DvectorTorchscriptTeacher(nn.Module):
             embedder = embedder or loaded_emb
         self._wav2mel = wav2mel
         self._embedder = embedder
-        self._device = torch.device(device) if not isinstance(device, torch.device) else device
+        # The dvector torchscript and our pure-Python Wav2Mel both live on
+        # CPU (torchaudio.MelSpectrogram registers its window as a CPU
+        # buffer; torch.stft would otherwise raise "input and window must
+        # be on the same device" when audio arrives on xla:0). Ignore the
+        # caller-provided device for compute and move outputs back at the
+        # end of forward().
+        self._device = torch.device("cpu")
 
     @torch.no_grad()
     def forward(
