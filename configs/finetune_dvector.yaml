@@ -13,7 +13,7 @@ backbone:
 
 teacher:
   kind: dvector_torchscript
-  model_id: ttsds/dvector       # Wav2Mel + dvector.pt baked into the ttsds package
+  model_id: yistLin/dvector       # GitHub release v1.1.1 — wav2mel.pt + dvector-step250000.pt
   in_loop: true
   cache_dir: null
   target_dim: 256
