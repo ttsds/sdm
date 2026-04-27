@@ -469,17 +469,70 @@ def make_collate(
     if teacher_processor_id is None and student_processor_id is None:
         return collate
 
-    from transformers import AutoFeatureExtractor  # type: ignore
+    return _CollateWithProcessor(
+        teacher_processor_id=teacher_processor_id,
+        student_processor_id=student_processor_id,
+        sample_rate=sample_rate,
+    )
 
-    def _make_extractor(model_id: str | None):
-        if model_id is None:
-            return None
-        return AutoFeatureExtractor.from_pretrained(model_id, **hf_token_kwargs())
 
-    teacher_extractor = _make_extractor(teacher_processor_id)
-    student_extractor = _make_extractor(student_processor_id)
+class _CollateWithProcessor:
+    """Picklable collate that applies HF feature extractors per side.
 
-    def _process(extractor, audio: torch.Tensor, chunk_mask: torch.Tensor) -> torch.Tensor:
+    Implemented as a top-level class (rather than a closure) so it survives
+    ``multiprocessing`` ``spawn`` start (used by torch_xla's parallel loader
+    when ``num_workers > 0``); local closures cannot be pickled.
+    """
+
+    def __init__(
+        self,
+        *,
+        teacher_processor_id: str | None,
+        student_processor_id: str | None,
+        sample_rate: int,
+    ) -> None:
+        self.teacher_processor_id = teacher_processor_id
+        self.student_processor_id = student_processor_id
+        self.sample_rate = int(sample_rate)
+        # Lazily built so each worker process loads its own extractors after
+        # ``spawn`` rather than trying to pickle them across the fork barrier.
+        self._teacher_extractor: Any | None = None
+        self._student_extractor: Any | None = None
+        self._initialised = False
+
+    # --- pickling: drop the lazily-built extractors ----------------------
+    def __getstate__(self) -> dict[str, Any]:
+        return {
+            "teacher_processor_id": self.teacher_processor_id,
+            "student_processor_id": self.student_processor_id,
+            "sample_rate": self.sample_rate,
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.teacher_processor_id = state["teacher_processor_id"]
+        self.student_processor_id = state["student_processor_id"]
+        self.sample_rate = state["sample_rate"]
+        self._teacher_extractor = None
+        self._student_extractor = None
+        self._initialised = False
+
+    def _ensure_extractors(self) -> None:
+        if self._initialised:
+            return
+        from transformers import AutoFeatureExtractor  # type: ignore
+
+        def _make(model_id: str | None):
+            if model_id is None:
+                return None
+            return AutoFeatureExtractor.from_pretrained(model_id, **hf_token_kwargs())
+
+        self._teacher_extractor = _make(self.teacher_processor_id)
+        self._student_extractor = _make(self.student_processor_id)
+        self._initialised = True
+
+    def _process(
+        self, extractor: Any, audio: torch.Tensor, chunk_mask: torch.Tensor
+    ) -> torch.Tensor:
         b, n, t = audio.shape
         do_normalize = bool(getattr(extractor, "do_normalize", False))
         if not do_normalize:
@@ -497,10 +550,10 @@ def make_collate(
             valid_n = int(chunk_mask[i].sum().item())
             if valid_n <= 0:
                 continue
-            utt = audio[i, :valid_n].reshape(-1).numpy()  # (valid_n * T,)
+            utt = audio[i, :valid_n].reshape(-1).numpy()
             processed = extractor(
                 utt,
-                sampling_rate=sample_rate,
+                sampling_rate=self.sample_rate,
                 return_tensors="pt",
                 padding=False,
             )
@@ -508,17 +561,16 @@ def make_collate(
             normed_audio[i, :valid_n] = normed.reshape(valid_n, t)
         return normed_audio
 
-    def _collate_with_processor(batch: list[dict[str, Any]]) -> dict[str, Any]:
+    def __call__(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
+        self._ensure_extractors()
         out = collate(batch)
-        audio = out["audio"]  # (B, N, T) float32 cpu
-        chunk_mask = out["chunk_mask"]  # (B, N) bool
-        if teacher_extractor is not None:
-            out["teacher_audio"] = _process(teacher_extractor, audio, chunk_mask)
-        if student_extractor is not None:
-            out["student_audio"] = _process(student_extractor, audio, chunk_mask)
+        audio = out["audio"]
+        chunk_mask = out["chunk_mask"]
+        if self._teacher_extractor is not None:
+            out["teacher_audio"] = self._process(self._teacher_extractor, audio, chunk_mask)
+        if self._student_extractor is not None:
+            out["student_audio"] = self._process(self._student_extractor, audio, chunk_mask)
         return out
-
-    return _collate_with_processor
 
 
 __all__ = [
