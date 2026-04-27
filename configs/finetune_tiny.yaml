@@ -1,0 +1,58 @@
+# sdm-tiny: tiny in-tree transformer student to debug the distillation pipeline.
+# Same teacher (mHuBERT-147 layer 8) and data pipeline as finetune_xlsr.yaml,
+# but the student is a from-scratch Conv1d + Transformer encoder so any NaN
+# can be attributed to the data/loss path rather than to the HF backbone.
+
+experiment: sdm-tiny
+
+backbone:
+  kind: tiny
+  model_id: tiny                 # ignored by the tiny backbone
+  hidden_size: 384
+  layer_idx: -1
+  num_hidden_layers: 4
+  num_attention_heads: 6
+  intermediate_size: 1536
+  frame_kernel: 400
+  frame_stride: 320
+  sample_rate: 16000
+
+teacher:
+  kind: hf_ssl
+  model_id: utter-project/mHuBERT-147
+  layer: 8
+  in_loop: true
+  cache_dir: null
+  target_dim: 768
+  pooled: chunked
+  target_layernorm: true
+
+data:
+  repo_id: amphion/Emilia-Dataset
+  split: train
+  streaming: true
+  shuffle_buffer: 10000
+  seed: 0
+  fraction: 0.1
+  sample_rate: 16000
+  chunk_seconds: 1.0
+  max_chunks: 32
+
+train:
+  batch_size: 16
+  grad_accum: 1
+  lr: 5.0e-4
+  weight_decay: 0.01
+  warmup_steps: 200
+  total_steps: 10000
+  log_every: 1
+  ckpt_every: 5000
+  ckpt_dir: gs://sdm-ckpts/sdm-tiny
+  resume_from_latest: true
+  fsdp: false
+  seed: 0
+  wandb:
+    enabled: true
+    project: sdm
+    run_name: sdm-tiny-debug
+    tags: [finetune, tiny, debug, v6e-8]
