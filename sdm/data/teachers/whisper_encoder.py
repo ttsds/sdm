@@ -96,44 +96,40 @@ class WhisperEncoderTeacher(nn.Module):
         if chunk_mask is None:
             chunk_mask = torch.ones((b, n), dtype=torch.bool, device=audio.device)
 
-        # Per-utterance: stitch valid chunks back into a contiguous waveform,
-        # run the Whisper feature extractor + encoder once, then mean-pool
-        # encoder frames into the chunk grid. Padded chunks are zeroed at
-        # the end via ``chunk_mask``.
-        outputs: list[torch.Tensor] = []
-        for i in range(b):
-            valid_n = int(chunk_mask[i].sum().item())
-            features = torch.zeros((n, self.target_dim), dtype=torch.float32, device=self._device)
-            if valid_n > 0:
-                waveform = audio[i, :valid_n].reshape(-1).to(torch.float32).cpu().numpy()
-                proc = self.feature_extractor(
-                    waveform,
-                    sampling_rate=self.sample_rate,
-                    return_tensors="pt",
-                )
-                input_features = proc["input_features"].to(self._device)
-                enc_out = self.encoder(input_features, return_dict=True)
-                # (1, T_enc, D); take the prefix corresponding to the real audio.
-                hidden = enc_out.last_hidden_state.squeeze(0)
-                d = hidden.shape[-1]
-                if d != self.target_dim:
-                    raise ValueError(
-                        f"whisper encoder hidden dim {d} != configured target_dim {self.target_dim}"
-                    )
-                needed = valid_n * self._frames_per_chunk
-                hidden = hidden[:needed]
-                # Pad if Whisper truncated (e.g. very long inputs >30s).
-                if hidden.shape[0] < needed:
-                    pad = torch.zeros(
-                        (needed - hidden.shape[0], d),
-                        dtype=hidden.dtype,
-                        device=hidden.device,
-                    )
-                    hidden = torch.cat([hidden, pad], dim=0)
-                pooled = hidden.reshape(valid_n, self._frames_per_chunk, d).mean(dim=1)
-                features[:valid_n] = pooled.to(features.dtype)
-            outputs.append(features)
-        out = torch.stack(outputs, dim=0)  # (B, N, D)
+        # Fully batched path: flatten chunks back into per-utterance
+        # waveforms, run the feature extractor in one batched call, run
+        # the encoder on the whole batch once, then mean-pool encoder
+        # frames into the 1-second chunk grid. Invalid (padded) chunks
+        # are zeroed via ``chunk_mask`` at the end.
+        #
+        # Note: Whisper truncates to 30s of audio (1500 encoder frames).
+        # If ``n * chunk_seconds > 30`` the trailing chunks are zero-padded.
+        flat = audio.reshape(b, n * t).to(torch.float32).cpu().numpy()
+        proc = self.feature_extractor(
+            [row for row in flat],
+            sampling_rate=self.sample_rate,
+            return_tensors="pt",
+        )
+        input_features = proc["input_features"].to(self._device)
+        enc_out = self.encoder(input_features, return_dict=True)
+        hidden = enc_out.last_hidden_state  # (B, T_enc, D)
+        d = hidden.shape[-1]
+        if d != self.target_dim:
+            raise ValueError(
+                f"whisper encoder hidden dim {d} != configured target_dim {self.target_dim}"
+            )
+
+        needed = n * self._frames_per_chunk
+        if hidden.shape[1] < needed:
+            pad = torch.zeros(
+                (b, needed - hidden.shape[1], d),
+                dtype=hidden.dtype,
+                device=hidden.device,
+            )
+            hidden = torch.cat([hidden, pad], dim=1)
+        hidden = hidden[:, :needed]  # (B, n*fpc, D)
+        out = hidden.reshape(b, n, self._frames_per_chunk, d).mean(dim=2)
+        out = out.to(audio.device, dtype=torch.float32)
 
         if self.target_layernorm:
             out = torch.nn.functional.layer_norm(out, (self.target_dim,))
