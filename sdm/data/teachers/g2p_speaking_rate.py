@@ -106,11 +106,20 @@ class _PhonemizerCounter:
         backend = self._backends.get(voice)
         if backend is None:
             try:
+                # phonemizer logs "words count mismatch" warnings whenever
+                # espeak-ng's output token count differs from the input
+                # (contractions, numbers, punctuation). We only count phones,
+                # so word alignment is irrelevant — silence the spam.
+                import logging
+
+                quiet = logging.getLogger("phonemizer")
+                quiet.setLevel(logging.ERROR)
                 backend = self._EspeakBackend(
                     voice,
                     preserve_punctuation=False,
                     with_stress=False,
                     language_switch="remove-flags",
+                    logger=quiet,
                 )
             except Exception as exc:  # pragma: no cover - environment-dependent
                 self._import_error = exc
