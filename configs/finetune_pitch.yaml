@@ -18,6 +18,7 @@ teacher:
   target_dim: 1
   pooled: chunked                # one scalar per chunk
   target_layernorm: false
+  loss: l1                       # scalar target: cosine is degenerate, use plain L1
   chunk_seconds: 1.0
   sample_rate: 16000
 

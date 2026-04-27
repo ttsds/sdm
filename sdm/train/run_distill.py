@@ -35,6 +35,9 @@ class TeacherConfig:
     layer: int | None = None
     cache_dir: str | None = None
     target_layernorm: bool = True
+    # Distillation loss: "cos_l1" (default, dense embeddings),
+    # "l1" (scalar regression), or "mse".
+    loss: str = "cos_l1"
     # Optional, teacher-specific extras (e.g. g2p speaking-rate, pyworld_f0).
     chunk_seconds: float | None = None
     sample_rate: int | None = None
@@ -179,6 +182,21 @@ def _masked_mse(pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tens
     diff = (pred - target) * mask
     denom = mask.sum() * pred.shape[-1]
     return diff.pow(2).sum() / torch.clamp(denom, min=1.0)
+
+
+def _masked_l1(pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tensor) -> torch.Tensor:
+    """Plain masked L1, averaged over masked chunk positions.
+
+    Used for scalar regression targets (``target_dim == 1``) where the
+    cosine term in :func:`_masked_cos_l1` collapses to ``sign(pred) *
+    sign(target)`` and contributes no useful gradient w.r.t. magnitude.
+    """
+    pred_f = pred.float()
+    target_f = target.float()
+    mask = chunk_mask.to(pred_f.dtype)
+    l1_per_token = (pred_f - target_f).abs().mean(dim=-1) * mask
+    denom = torch.clamp(mask.sum(), min=1.0)
+    return l1_per_token.sum() / denom
 
 
 def _masked_cos_l1(
@@ -365,12 +383,22 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             t0 = time.perf_counter()
 
         pred = student(student_audio)
-        if verbose and xla_utils.is_master():
-            loss_terms = _masked_cos_l1_terms(pred, target, chunk_mask)
-            loss = loss_terms["loss"] / cfg.train.grad_accum
-        else:
+        loss_kind = cfg.teacher.loss
+        if loss_kind == "cos_l1":
+            if verbose and xla_utils.is_master():
+                loss_terms = _masked_cos_l1_terms(pred, target, chunk_mask)
+                loss = loss_terms["loss"] / cfg.train.grad_accum
+            else:
+                loss_terms = None
+                loss = _masked_cos_l1(pred, target, chunk_mask) / cfg.train.grad_accum
+        elif loss_kind == "l1":
             loss_terms = None
-            loss = _masked_cos_l1(pred, target, chunk_mask) / cfg.train.grad_accum
+            loss = _masked_l1(pred, target, chunk_mask) / cfg.train.grad_accum
+        elif loss_kind == "mse":
+            loss_terms = None
+            loss = _masked_mse(pred, target, chunk_mask) / cfg.train.grad_accum
+        else:
+            raise ValueError(f"unknown teacher.loss={loss_kind!r}")
         loss.backward()
         if verbose and xla_utils.is_master():
             xla_utils.mark_step()

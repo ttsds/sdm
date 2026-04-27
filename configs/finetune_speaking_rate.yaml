@@ -19,6 +19,7 @@ teacher:
   target_dim: 1
   pooled: chunked                 # broadcast utterance rate across valid chunks
   target_layernorm: false         # 1-D scalar; LN would zero it out
+  loss: l1                        # scalar target: cosine is degenerate, use plain L1
   chunk_seconds: 1.0
   default_language: en
 
