@@ -201,10 +201,64 @@ def _strip_weight_norm(conv: nn.Conv1d) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Transformer encoder layer / stack. Uses ``nn.MultiheadAttention`` so the
-# checkpoint converter can splat HF's separate q/k/v projections into the
-# combined ``in_proj_weight`` tensor.
+# Transformer encoder layer / stack.
+#
+# We deliberately do *not* use ``nn.MultiheadAttention``: on XLA / TPU it
+# (a) lowers poorly because of the ``(B, T, C) -> (T, B, C)`` transpose it
+# requires with ``batch_first=False`` (and the ``batch_first=True`` path
+# still routes through the same fused kernel that does in-dtype softmax),
+# and (b) computes the attention softmax in the surrounding autocast dtype,
+# so under bf16 the ``QK^T`` logits can overflow and produce NaNs.
+#
+# Instead we keep the *same parameter shapes and names* that
+# ``nn.MultiheadAttention`` uses (``in_proj_weight``, ``in_proj_bias``,
+# ``out_proj.weight``, ``out_proj.bias``) so the HF -> fairseq state-dict
+# converter is unchanged, and we route the actual computation through
+# ``F.scaled_dot_product_attention`` which uses an fp32 softmax internally
+# on XLA. The whole encoder also stays in ``(B, T, C)`` layout, removing 24
+# tensor transposes per forward pass.
 # ---------------------------------------------------------------------------
+
+
+class _SDPASelfAttention(nn.Module):
+    """Self-attention block with ``nn.MultiheadAttention``-compatible params.
+
+    Parameter names match ``nn.MultiheadAttention`` exactly:
+    ``in_proj_weight`` (3*E, E), ``in_proj_bias`` (3*E,), ``out_proj.weight``
+    (E, E), ``out_proj.bias`` (E,). Forward expects ``x`` in ``(B, T, C)``.
+    """
+
+    def __init__(self, embed_dim: int, num_heads: int, dropout: float = 0.0) -> None:
+        super().__init__()
+        if embed_dim % num_heads != 0:
+            raise ValueError("embed_dim must be divisible by num_heads")
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.dropout_p = dropout
+        self.in_proj_weight = nn.Parameter(torch.empty(3 * embed_dim, embed_dim))
+        self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim))
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=True)
+        nn.init.xavier_uniform_(self.in_proj_weight)
+        nn.init.zeros_(self.in_proj_bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, T, C) -> qkv: (B, T, 3C)
+        qkv = F.linear(x, self.in_proj_weight, self.in_proj_bias)
+        b, t, _ = x.shape
+        qkv = qkv.view(b, t, 3, self.num_heads, self.head_dim)
+        # -> (3, B, num_heads, T, head_dim)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        attn = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=None,
+            dropout_p=self.dropout_p if self.training else 0.0,
+            is_causal=False,
+        )
+        # (B, num_heads, T, head_dim) -> (B, T, C)
+        attn = attn.transpose(1, 2).contiguous().view(b, t, self.embed_dim)
+        return self.out_proj(attn)
 
 
 class TransformerSentenceEncoderLayer(nn.Module):
@@ -231,11 +285,10 @@ class TransformerSentenceEncoderLayer(nn.Module):
             raise ValueError(f"unsupported activation_fn for the port: {activation_fn!r}")
         self.activation_fn = F.gelu
 
-        self.self_attn = nn.MultiheadAttention(
+        self.self_attn = _SDPASelfAttention(
             embedding_dim,
             num_attention_heads,
             dropout=attention_dropout,
-            batch_first=False,
         )
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(activation_dropout)
@@ -246,19 +299,11 @@ class TransformerSentenceEncoderLayer(nn.Module):
         self.fc2 = nn.Linear(ffn_embedding_dim, embedding_dim)
         self.final_layer_norm = nn.LayerNorm(embedding_dim)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        self_attn_padding_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
         if self.layer_norm_first:
             x = self.self_attn_layer_norm(x)
-            x, _ = self.self_attn(
-                x, x, x,
-                key_padding_mask=self_attn_padding_mask,
-                need_weights=False,
-            )
+            x = self.self_attn(x)
             x = self.dropout1(x)
             x = residual + x
 
@@ -270,11 +315,7 @@ class TransformerSentenceEncoderLayer(nn.Module):
             x = self.dropout3(x)
             x = residual + x
         else:
-            x, _ = self.self_attn(
-                x, x, x,
-                key_padding_mask=self_attn_padding_mask,
-                need_weights=False,
-            )
+            x = self.self_attn(x)
             x = self.dropout1(x)
             x = residual + x
             x = self.self_attn_layer_norm(x)
@@ -334,19 +375,16 @@ class TransformerEncoder(nn.Module):
             x = self.layer_norm(x)
 
         x = F.dropout(x, p=self.dropout, training=self.training)
-        # B x T x C -> T x B x C for nn.MultiheadAttention with batch_first=False.
-        x = x.transpose(0, 1)
-
+        # Stays in (B, T, C) the whole way through.
         hidden_states: list[torch.Tensor] = []
         if output_hidden_states:
-            hidden_states.append(x.transpose(0, 1))
+            hidden_states.append(x)
 
         for layer in self.layers:
-            x = layer(x, self_attn_padding_mask=padding_mask)
+            x = layer(x)
             if output_hidden_states:
-                hidden_states.append(x.transpose(0, 1))
+                hidden_states.append(x)
 
-        x = x.transpose(0, 1)
         if self.layer_norm_first:
             x = self.layer_norm(x)
         if output_hidden_states:
