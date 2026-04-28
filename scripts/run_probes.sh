@@ -40,6 +40,7 @@ uv run python scripts/run_linear_probes.py \
     --split "${SDM_PROBE_SPLIT:-dev.clean}" \
     --probe-utterances "${SDM_PROBE_UTTERANCES:-100}" \
     --batch-size "${SDM_PROBE_BATCH_SIZE:-4}" \
+    --device "${SDM_PROBE_DEVICE:-cpu}" \
     --layer-sweep \
     --out "$OUT_DIR" \
     ${WANDB_API_KEY:+--wandb}
