@@ -132,12 +132,40 @@ def teacher_targets(
     return np.vstack(out) if out else np.zeros((0, 0), dtype=np.float32)
 
 
+def _nonfinite_report(arr: np.ndarray) -> dict:
+    """Count NaN / +Inf / -Inf cells and the rows containing any of them."""
+    flat = arr.reshape(arr.shape[0], -1) if arr.ndim > 1 else arr.reshape(-1, 1)
+    n_nan = int(np.isnan(flat).sum())
+    n_posinf = int(np.isposinf(flat).sum())
+    n_neginf = int(np.isneginf(flat).sum())
+    bad_rows = int((~np.isfinite(flat).all(axis=1)).sum())
+    return {
+        "n_nan": n_nan,
+        "n_posinf": n_posinf,
+        "n_neginf": n_neginf,
+        "n_rows_bad": bad_rows,
+        "n_rows_total": int(flat.shape[0]),
+    }
+
+
+def _fmt_report(rep: dict) -> str:
+    return (
+        f"NaN={rep['n_nan']} +Inf={rep['n_posinf']} -Inf={rep['n_neginf']} "
+        f"bad_rows={rep['n_rows_bad']}/{rep['n_rows_total']}"
+    )
+
+
 def fit_probe(x: np.ndarray, y: np.ndarray, *, alpha: float = 1.0) -> dict:
     # Drop rows where either side contains non-finite values. Some teachers
     # (e.g. pitch / speaking-rate) emit NaN for silent / undefined chunks and
     # the backbone can produce NaN/Inf if the fp16 forward overflows; sklearn
     # Ridge refuses to fit either.
-    finite = np.isfinite(x).all(axis=1) & np.isfinite(y).reshape(y.shape[0], -1).all(axis=1)
+    x_finite = np.isfinite(x).all(axis=1)
+    y_finite = np.isfinite(y).reshape(y.shape[0], -1).all(axis=1)
+    finite = x_finite & y_finite
+    n_dropped_x_only = int((~x_finite & y_finite).sum())
+    n_dropped_y_only = int((x_finite & ~y_finite).sum())
+    n_dropped_both = int((~x_finite & ~y_finite).sum())
     n_dropped = int((~finite).sum())
     if n_dropped:
         x = x[finite]
@@ -148,6 +176,9 @@ def fit_probe(x: np.ndarray, y: np.ndarray, *, alpha: float = 1.0) -> dict:
             "r2_test": float("nan"),
             "n_test": int(x.shape[0]),
             "n_dropped": n_dropped,
+            "n_dropped_x_only": n_dropped_x_only,
+            "n_dropped_y_only": n_dropped_y_only,
+            "n_dropped_both": n_dropped_both,
         }
     x_tr, x_te, y_tr, y_te = train_test_split(x, y, test_size=0.2, random_state=0)
     model = Ridge(alpha=alpha)
@@ -157,6 +188,9 @@ def fit_probe(x: np.ndarray, y: np.ndarray, *, alpha: float = 1.0) -> dict:
         "r2_test": float(r2_score(y_te, model.predict(x_te), multioutput="uniform_average")),
         "n_test": int(len(x_te)),
         "n_dropped": n_dropped,
+        "n_dropped_x_only": n_dropped_x_only,
+        "n_dropped_y_only": n_dropped_y_only,
+        "n_dropped_both": n_dropped_both,
     }
 
 
@@ -207,17 +241,27 @@ def main() -> None:
 
     # Pre-compute teacher targets once (shared across SDM_i). Build, run, drop.
     target_matrix: dict[str, np.ndarray] = {}
+    teacher_health: dict[str, dict] = {}
     for exp in experiments:
         cfg = yaml.safe_load(Path(EXPERIMENT_TO_FINETUNE_CONFIG[exp]).read_text())
         teacher = build_teacher(cfg["teacher"], device=device)
         target_matrix[exp] = teacher_targets(teacher, held_out, device=device, batch_size=args.batch_size)
-        print(f"[probe] teacher[{exp}] -> shape={target_matrix[exp].shape}")
+        rep = _nonfinite_report(target_matrix[exp])
+        teacher_health[exp] = rep
+        print(f"[probe] teacher[{exp}] -> shape={target_matrix[exp].shape}  {_fmt_report(rep)}")
+        if rep["n_rows_bad"]:
+            print(
+                f"        ^ {rep['n_rows_bad']} non-finite chunks in target; "
+                f"likely silent/undefined (pitch=NaN on unvoiced; speaking_rate "
+                f"can NaN on silence; ssl teachers can overflow in fp16)."
+            )
         del teacher
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     # Sweep latents per (sdm_exp, layer); fit probes against every target.
     backbone_model_ids: dict[str, str] = {}
+    backbone_health: dict[tuple[str, int], dict] = {}
     results = []
     for sdm_exp in experiments:
         ckpt = args.consolidated / sdm_exp / "backbone.pt"
@@ -237,6 +281,13 @@ def main() -> None:
         for layer in layers:
             x = encode_with_backbone(backbone, held_out, layer=layer, device=device,
                                      batch_size=args.batch_size)
+            x_rep = _nonfinite_report(x)
+            backbone_health[(sdm_exp, int(layer))] = x_rep
+            if x_rep["n_rows_bad"]:
+                print(
+                    f"[probe] {sdm_exp} L{layer}: backbone latents have "
+                    f"{_fmt_report(x_rep)}"
+                )
             for tgt_exp, y in target_matrix.items():
                 if x.shape[0] != y.shape[0]:
                     raise RuntimeError(
@@ -259,6 +310,20 @@ def main() -> None:
 
     (args.out / "matrix.json").write_text(json.dumps(results, indent=2))
     print(f"[done] {len(results)} probes -> {args.out / 'matrix.json'}")
+
+    # Summary of where non-finite values came from.
+    bad_teachers = {exp: r for exp, r in teacher_health.items() if r["n_rows_bad"]}
+    if bad_teachers:
+        print("[probe] teachers with non-finite chunks:")
+        for exp, r in bad_teachers.items():
+            print(f"        {exp:>20s}  {_fmt_report(r)}")
+    bad_backbones = {k: r for k, r in backbone_health.items() if r["n_rows_bad"]}
+    if bad_backbones:
+        print("[probe] backbones with non-finite latents:")
+        for (exp, layer), r in bad_backbones.items():
+            print(f"        {exp:>20s} L{layer:<2}  {_fmt_report(r)}")
+    if not bad_teachers and not bad_backbones:
+        print("[probe] no non-finite values detected anywhere.")
 
     # Summary of any backbone/yaml mismatches detected during the sweep.
     mismatched = {
