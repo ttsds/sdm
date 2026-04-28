@@ -1,5 +1,5 @@
 # sdm-emotion2vec: distill emotion2vec utterance embeddings into XLS-R 300M.
-# Backed by FunASR's AutoModel wrapper around iic/emotion2vec_base (the
+# Backed by FunASR's AutoModel wrapper around emotion2vec/emotion2vec_base
 # universal pretrained 768-d emotion representation, no fine-tuning).
 # emotion2vec runs on the TPU host CPU inside the no-grad teacher pass --
 # its internal batch size is 1 so we benefit from chunk parallelism only
@@ -15,7 +15,7 @@ backbone:
 
 teacher:
   kind: emotion2vec
-  model_id: iic/emotion2vec_base
+  model_id: emotion2vec/emotion2vec_base
   hub: hf                          # "hf" (HuggingFace) or "ms" (modelscope)
   in_loop: true
   cache_dir: null

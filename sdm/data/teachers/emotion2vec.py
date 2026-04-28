@@ -30,7 +30,7 @@ from torch import nn
 
 @dataclass
 class Emotion2vecConfig:
-    model_id: str = "iic/emotion2vec_base"
+    model_id: str = "emotion2vec/emotion2vec_base"
     target_dim: int = 768
     pooled: str = "chunked"
     sample_rate: int = 16000
