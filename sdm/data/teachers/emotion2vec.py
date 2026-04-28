@@ -62,6 +62,15 @@ def _load_emotion2vec(model_id: str, hub: str, device: torch.device | str):
     """Load the FunASR ``AutoModel`` wrapper around emotion2vec."""
     from funasr import AutoModel  # type: ignore
 
+    # Force registration of the ``Emotion2vec`` model class. FunASR's
+    # ``AutoModel`` looks up ``tables.model_classes["Emotion2vec"]``, which
+    # is only populated when ``funasr.models.emotion2vec.model`` is
+    # imported (the module applies a ``@tables.register`` decorator at
+    # import time). Worker processes spawned by ``torch_xla.xmp.spawn``
+    # don't trigger FunASR's lazy auto-discovery, so without this import
+    # we get ``AssertionError: iic/emotion2vec_base is not registered``.
+    import funasr.models.emotion2vec.model  # noqa: F401
+
     return AutoModel(
         model=model_id,
         hub=hub,
