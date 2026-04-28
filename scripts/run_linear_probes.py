@@ -260,6 +260,10 @@ def main() -> None:
     ap.add_argument("--layer-sweep", action="store_true",
                     help="probe every backbone layer; otherwise just the configured one")
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--device", default="cpu",
+                    help="torch device for teachers + backbones; default cpu "
+                         "(100 utterances is small and TPU XLA compile dominates)."
+                         " Pass 'auto' to use sdm.train.xla_utils.get_device().")
     ap.add_argument("--wandb", action="store_true")
     args = ap.parse_args()
 
@@ -272,7 +276,7 @@ def main() -> None:
     args.out.mkdir(parents=True, exist_ok=True)
     manifest = json.loads((args.consolidated / "manifest.json").read_text())
     experiments = list(manifest)
-    device = get_device()
+    device = get_device() if args.device == "auto" else torch.device(args.device)
     print(f"[probe] device={device}  experiments={experiments}")
 
     print(f"[probe] loading {args.probe_utterances} utterances from "
