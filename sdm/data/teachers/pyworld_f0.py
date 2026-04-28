@@ -34,6 +34,11 @@ class PyworldF0Config:
     f0_floor: float = 71.0
     f0_ceil: float = 800.0
     target_layernorm: bool = False
+    # Linear target normalisation: out -> (out - target_mean) / target_scale.
+    # Defaults of (0, 1) are no-ops; the YAML config sets sane values so the
+    # L1 loss against a zero-init regression head doesn't start at ~150.
+    target_mean: float = 0.0
+    target_scale: float = 1.0
 
 
 def _coerce_config(cfg: Any) -> PyworldF0Config:
@@ -48,6 +53,8 @@ def _coerce_config(cfg: Any) -> PyworldF0Config:
         "f0_floor",
         "f0_ceil",
         "target_layernorm",
+        "target_mean",
+        "target_scale",
     )
     if hasattr(cfg, "kind"):
         return PyworldF0Config(
@@ -135,6 +142,11 @@ class PyworldF0Teacher(nn.Module):
                 out[i, c, 0] = float(voiced.mean())
 
         out = out.to(audio.device)
+        scale = float(self.cfg.target_scale)
+        if scale != 1.0 or float(self.cfg.target_mean) != 0.0:
+            if scale == 0.0:
+                raise ValueError("target_scale must be non-zero")
+            out = (out - float(self.cfg.target_mean)) / scale
         if self.cfg.target_layernorm:
             # Single scalar — LN would zero it out. Honor explicit opt-in.
             out = torch.nn.functional.layer_norm(out, (1,))

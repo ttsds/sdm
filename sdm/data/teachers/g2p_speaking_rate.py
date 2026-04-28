@@ -55,6 +55,9 @@ class G2pSpeakingRateConfig:
     sample_rate: int = 16000
     default_language: str = "en"
     target_layernorm: bool = False  # scalar target — LN would zero it
+    # Linear target normalisation: out -> (out - target_mean) / target_scale.
+    target_mean: float = 0.0
+    target_scale: float = 1.0
 
 
 def _coerce_config(cfg: Any) -> G2pSpeakingRateConfig:
@@ -67,6 +70,8 @@ def _coerce_config(cfg: Any) -> G2pSpeakingRateConfig:
         "sample_rate",
         "default_language",
         "target_layernorm",
+        "target_mean",
+        "target_scale",
     )
     if hasattr(cfg, "kind"):
         return G2pSpeakingRateConfig(**{f: getattr(cfg, f) for f in fields if hasattr(cfg, f) and getattr(cfg, f) is not None})
@@ -226,6 +231,11 @@ class G2pSpeakingRateTeacher(nn.Module):
                 rates[i] = count / max(durations[i], 1e-6)
 
         out = rates.view(b, 1, 1).expand(b, n, 1).contiguous().to(audio.device, dtype=torch.float32)
+        scale = float(self.cfg.target_scale)
+        if scale != 1.0 or float(self.cfg.target_mean) != 0.0:
+            if scale == 0.0:
+                raise ValueError("target_scale must be non-zero")
+            out = (out - float(self.cfg.target_mean)) / scale
         out = out * chunk_mask.unsqueeze(-1).to(out.dtype)
         return out
 

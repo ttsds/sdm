@@ -46,6 +46,10 @@ class TeacherConfig:
     f0_floor: float | None = None
     f0_ceil: float | None = None
     teacher_sample_rate: int | None = None
+    # Linear target normalisation applied inside scalar teachers
+    # (pyworld_f0, g2p_speaking_rate). out -> (out - mean) / scale.
+    target_mean: float | None = None
+    target_scale: float | None = None
 
 
 @dataclass

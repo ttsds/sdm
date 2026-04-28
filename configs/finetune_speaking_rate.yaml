@@ -20,6 +20,10 @@ teacher:
   pooled: chunked                 # broadcast utterance rate across valid chunks
   target_layernorm: false         # 1-D scalar; LN would zero it out
   loss: l1                        # scalar target: cosine is degenerate, use plain L1
+  # Linear normalisation so L1 starts at ~O(1) instead of ~10 phones/sec.
+  # Typical speaking rate ~12 phones/sec, std ~4.
+  target_mean: 12.0
+  target_scale: 4.0
   chunk_seconds: 1.0
   default_language: en
 

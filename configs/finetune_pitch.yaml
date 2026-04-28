@@ -19,6 +19,10 @@ teacher:
   pooled: chunked                # one scalar per chunk
   target_layernorm: false
   loss: l1                       # scalar target: cosine is degenerate, use plain L1
+  # Linear normalisation so L1 starts at ~O(1) instead of ~150 Hz.
+  # Voiced F0 mean ~150 Hz, range ~70-800; this maps to roughly [-1, 7].
+  target_mean: 150.0
+  target_scale: 100.0
   chunk_seconds: 1.0
   sample_rate: 16000
 
