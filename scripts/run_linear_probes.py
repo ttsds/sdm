@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -117,6 +119,45 @@ def encode_with_backbone(
             h = backbone.encode(audio.to(device), layer=layer)        # (B, N_chunks, H)
         feats.append(_flatten_valid(h, mask.to(h.device)))
     return np.vstack(feats) if feats else np.zeros((0, 0), dtype=np.float32)
+
+
+def encode_all_layers(
+    backbone, held_out: list[dict], *, device: torch.device, batch_size: int
+) -> list[np.ndarray]:
+    """Run the backbone once per batch and return per-layer flattened latents.
+
+    HuggingFace SSL models return all hidden states in a single forward when
+    ``output_hidden_states=True``. The previous code re-ran the full backbone
+    once per (experiment, layer) which was the dominant cost of ``--layer-sweep``
+    (25× wasted compute on a 24-layer XLS-R).
+    """
+    backbone.eval()
+    n_layers = backbone.num_hidden_layers + 1  # incl. embedding output
+    per_layer: list[list[np.ndarray]] = [[] for _ in range(n_layers)]
+    for start in range(0, len(held_out), batch_size):
+        batch = held_out[start : start + batch_size]
+        audio, mask, _ = _stack_batch(batch)
+        b, n, _ = audio.shape
+        with torch.no_grad():
+            outputs = backbone.backbone(
+                input_values=audio.reshape(b * n, -1).to(device),
+                output_hidden_states=True,
+                return_dict=True,
+            )
+        mask_dev = mask.to(device)
+        for li, hidden in enumerate(outputs.hidden_states):
+            pooled = hidden.mean(dim=1).reshape(b, n, backbone.hidden_size)
+            per_layer[li].append(_flatten_valid(pooled, mask_dev))
+    return [np.vstack(parts) if parts else np.zeros((0, 0), dtype=np.float32)
+            for parts in per_layer]
+
+
+@contextmanager
+def _timed(label: str):
+    t0 = time.perf_counter()
+    yield
+    dt = time.perf_counter() - t0
+    print(f"[time] {label}: {dt:.2f}s")
 
 
 def teacher_targets(
@@ -244,11 +285,18 @@ def main() -> None:
     teacher_health: dict[str, dict] = {}
     for exp in experiments:
         cfg = yaml.safe_load(Path(EXPERIMENT_TO_FINETUNE_CONFIG[exp]).read_text())
+        t0 = time.perf_counter()
         teacher = build_teacher(cfg["teacher"], device=device)
+        t_build = time.perf_counter() - t0
+        t0 = time.perf_counter()
         target_matrix[exp] = teacher_targets(teacher, held_out, device=device, batch_size=args.batch_size)
+        t_run = time.perf_counter() - t0
         rep = _nonfinite_report(target_matrix[exp])
         teacher_health[exp] = rep
-        print(f"[probe] teacher[{exp}] -> shape={target_matrix[exp].shape}  {_fmt_report(rep)}")
+        print(
+            f"[probe] teacher[{exp}] -> shape={target_matrix[exp].shape}  "
+            f"build={t_build:.1f}s  run={t_run:.1f}s  {_fmt_report(rep)}"
+        )
         if rep["n_rows_bad"]:
             print(
                 f"        ^ {rep['n_rows_bad']} non-finite chunks in target; "
@@ -265,7 +313,9 @@ def main() -> None:
     results = []
     for sdm_exp in experiments:
         ckpt = args.consolidated / sdm_exp / "backbone.pt"
+        t0 = time.perf_counter()
         backbone = load_backbone(ckpt, model_id=_backbone_model_id(sdm_exp))
+        t_load = time.perf_counter() - t0
         actual_id = getattr(backbone.backbone.config, "_name_or_path", None) or \
             f"hidden_size={backbone.backbone.config.hidden_size}"
         configured_id = _backbone_model_id(sdm_exp)
@@ -277,10 +327,24 @@ def main() -> None:
             )
         backbone.to(device)
         layer_count = backbone.num_hidden_layers
-        layers = range(layer_count + 1) if args.layer_sweep else [layer_count]
-        for layer in layers:
-            x = encode_with_backbone(backbone, held_out, layer=layer, device=device,
+        layers = list(range(layer_count + 1)) if args.layer_sweep else [layer_count]
+        # Run the backbone once per batch; keep all layers we need.
+        t0 = time.perf_counter()
+        if args.layer_sweep:
+            all_layer_feats = encode_all_layers(
+                backbone, held_out, device=device, batch_size=args.batch_size
+            )
+            layer_to_x = {li: all_layer_feats[li] for li in layers}
+        else:
+            x = encode_with_backbone(backbone, held_out, layer=layer_count, device=device,
                                      batch_size=args.batch_size)
+            layer_to_x = {layer_count: x}
+        t_encode = time.perf_counter() - t0
+        print(
+            f"[probe] {sdm_exp}: load={t_load:.1f}s  encode({len(layers)} layer(s))={t_encode:.1f}s"
+        )
+        for layer in layers:
+            x = layer_to_x[layer]
             x_rep = _nonfinite_report(x)
             backbone_health[(sdm_exp, int(layer))] = x_rep
             if x_rep["n_rows_bad"]:
@@ -288,6 +352,7 @@ def main() -> None:
                     f"[probe] {sdm_exp} L{layer}: backbone latents have "
                     f"{_fmt_report(x_rep)}"
                 )
+            t_layer_probes = time.perf_counter()
             for tgt_exp, y in target_matrix.items():
                 if x.shape[0] != y.shape[0]:
                     raise RuntimeError(
@@ -304,6 +369,10 @@ def main() -> None:
                     f"{sdm_exp:>20s} L{layer:>2}  ->  {tgt_exp:<20s}  "
                     f"R2_test={probe['r2_test']:+.3f}"
                 )
+            print(
+                f"[time] {sdm_exp} L{layer} probes ({len(target_matrix)} targets): "
+                f"{time.perf_counter() - t_layer_probes:.2f}s"
+            )
         del backbone
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
