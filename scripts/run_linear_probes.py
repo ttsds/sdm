@@ -35,6 +35,7 @@ import yaml
 from sklearn.linear_model import Ridge
 from sklearn.metrics import r2_score
 from sklearn.model_selection import train_test_split
+from tqdm.auto import tqdm
 
 try:
     from sdm.data.streaming_emilia import EmiliaConfig, iter_chunks
@@ -122,7 +123,7 @@ def encode_with_backbone(
 
 
 def encode_all_layers(
-    backbone, held_out: list[dict], *, device: torch.device, batch_size: int
+    backbone, held_out: list[dict], *, device: torch.device, batch_size: int, desc: str = "encode"
 ) -> list[np.ndarray]:
     """Run the backbone once per batch and return per-layer flattened latents.
 
@@ -134,7 +135,8 @@ def encode_all_layers(
     backbone.eval()
     n_layers = backbone.num_hidden_layers + 1  # incl. embedding output
     per_layer: list[list[np.ndarray]] = [[] for _ in range(n_layers)]
-    for start in range(0, len(held_out), batch_size):
+    n_batches = (len(held_out) + batch_size - 1) // batch_size
+    for start in tqdm(range(0, len(held_out), batch_size), total=n_batches, desc=desc, leave=False):
         batch = held_out[start : start + batch_size]
         audio, mask, _ = _stack_batch(batch)
         b, n, _ = audio.shape
@@ -161,10 +163,11 @@ def _timed(label: str):
 
 
 def teacher_targets(
-    teacher, held_out: list[dict], *, device: torch.device, batch_size: int
+    teacher, held_out: list[dict], *, device: torch.device, batch_size: int, desc: str = "teacher"
 ) -> np.ndarray:
     out: list[np.ndarray] = []
-    for start in range(0, len(held_out), batch_size):
+    n_batches = (len(held_out) + batch_size - 1) // batch_size
+    for start in tqdm(range(0, len(held_out), batch_size), total=n_batches, desc=desc, leave=False):
         batch = held_out[start : start + batch_size]
         audio, mask, ctx = _stack_batch(batch)
         with torch.no_grad():
@@ -283,13 +286,15 @@ def main() -> None:
     # Pre-compute teacher targets once (shared across SDM_i). Build, run, drop.
     target_matrix: dict[str, np.ndarray] = {}
     teacher_health: dict[str, dict] = {}
-    for exp in experiments:
+    for exp in tqdm(experiments, desc="teachers"):
         cfg = yaml.safe_load(Path(EXPERIMENT_TO_FINETUNE_CONFIG[exp]).read_text())
         t0 = time.perf_counter()
         teacher = build_teacher(cfg["teacher"], device=device)
         t_build = time.perf_counter() - t0
         t0 = time.perf_counter()
-        target_matrix[exp] = teacher_targets(teacher, held_out, device=device, batch_size=args.batch_size)
+        target_matrix[exp] = teacher_targets(
+            teacher, held_out, device=device, batch_size=args.batch_size, desc=f"teacher[{exp}]"
+        )
         t_run = time.perf_counter() - t0
         rep = _nonfinite_report(target_matrix[exp])
         teacher_health[exp] = rep
@@ -311,7 +316,7 @@ def main() -> None:
     backbone_model_ids: dict[str, str] = {}
     backbone_health: dict[tuple[str, int], dict] = {}
     results = []
-    for sdm_exp in experiments:
+    for sdm_exp in tqdm(experiments, desc="backbones"):
         ckpt = args.consolidated / sdm_exp / "backbone.pt"
         t0 = time.perf_counter()
         backbone = load_backbone(ckpt, model_id=_backbone_model_id(sdm_exp))
@@ -332,7 +337,8 @@ def main() -> None:
         t0 = time.perf_counter()
         if args.layer_sweep:
             all_layer_feats = encode_all_layers(
-                backbone, held_out, device=device, batch_size=args.batch_size
+                backbone, held_out, device=device, batch_size=args.batch_size,
+                desc=f"encode[{sdm_exp}]",
             )
             layer_to_x = {li: all_layer_feats[li] for li in layers}
         else:
@@ -343,7 +349,7 @@ def main() -> None:
         print(
             f"[probe] {sdm_exp}: load={t_load:.1f}s  encode({len(layers)} layer(s))={t_encode:.1f}s"
         )
-        for layer in layers:
+        for layer in tqdm(layers, desc=f"probes[{sdm_exp}]", leave=False):
             x = layer_to_x[layer]
             x_rep = _nonfinite_report(x)
             backbone_health[(sdm_exp, int(layer))] = x_rep
