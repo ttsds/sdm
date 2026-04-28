@@ -44,17 +44,39 @@ def _coerce_config(cfg: Any) -> WespeakerResnet34Config:
 def _load_pyannote_wespeaker(model_id: str) -> nn.Module:
     """Load the bare embedding nn.Module from a pyannote checkpoint.
 
-    pyannote.audio renamed ``use_auth_token`` to ``token`` somewhere
-    around 3.1; try the new spelling first and fall back for older
-    installs.
+    The auth-token kwarg name has churned across pyannote.audio versions:
+    3.0/3.1 use ``use_auth_token``, 4.x uses ``token``, and intermediate
+    builds may accept neither (in which case ``huggingface_hub`` falls
+    back to reading ``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN`` from the
+    environment, which our ``hf_token_kwargs`` helper already populates).
+
+    We introspect the signature once and pass only the kwarg the
+    installed version actually accepts.
     """
+    import inspect
+    import os
+
     from pyannote.audio import Model  # type: ignore
 
     token = hf_token_kwargs().get("token")
-    try:
-        return Model.from_pretrained(model_id, token=token).eval()
-    except TypeError:
-        return Model.from_pretrained(model_id, use_auth_token=token).eval()
+    if token is not None:
+        # Make sure huggingface_hub picks the token up via env even if we
+        # cannot pass it explicitly.
+        os.environ.setdefault("HF_TOKEN", token)
+
+    kwargs: dict[str, Any] = {}
+    if token is not None:
+        try:
+            params = inspect.signature(Model.from_pretrained).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if "token" in params:
+            kwargs["token"] = token
+        elif "use_auth_token" in params:
+            kwargs["use_auth_token"] = token
+        # else: rely on env-var fallback inside huggingface_hub
+
+    return Model.from_pretrained(model_id, **kwargs).eval()
 
 
 class WespeakerResnet34Teacher(nn.Module):
