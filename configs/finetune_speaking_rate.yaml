@@ -1,8 +1,11 @@
-# sdm-speaking-rate: distill phonemes-per-second derived from the dataset
+# sdm-speaking-rate: distill syllables-per-second derived from the dataset
 # transcript via grapheme-to-phoneme (espeak-ng / phonemizer). Replaces the
 # Allosaurus-based teacher: Emilia ships transcripts so we no longer need
-# the offline phone-recognizer cache, and the target is exact phones/sec
-# rather than a recognizer estimate.
+# the offline phone-recognizer cache. We count vowel groups (syllable
+# nuclei) rather than total phonemes -- vowel count is far more
+# language-invariant than the full phoneme inventory size, which made the
+# original phones/sec target effectively language-conditioned and very
+# hard for the audio-only student to fit.
 
 experiment: sdm-speaking-rate
 
@@ -20,10 +23,11 @@ teacher:
   pooled: chunked                 # broadcast utterance rate across valid chunks
   target_layernorm: false         # 1-D scalar; LN would zero it out
   loss: l1                        # scalar target: cosine is degenerate, use plain L1
-  # Linear normalisation so L1 starts at ~O(1) instead of ~10 phones/sec.
-  # Typical speaking rate ~12 phones/sec, std ~4.
-  target_mean: 12.0
-  target_scale: 4.0
+  count_mode: vowels              # syllables/sec; "phonemes" for legacy phones/sec
+  # Linear normalisation so L1 starts at ~O(1).
+  # Typical syllable rate ~4 syl/sec, std ~1.5.
+  target_mean: 4.0
+  target_scale: 1.5
   chunk_seconds: 1.0
   default_language: en
 

@@ -5,7 +5,17 @@ utterance. Allosaurus has no TPU implementation and would force an offline
 pre-extraction step. Since Emilia ships per-utterance transcripts, we
 reproduce the same target via grapheme-to-phoneme on the transcript:
 
-    speaking_rate = #phonemes(text) / utterance_duration_seconds
+    speaking_rate = #units(text) / utterance_duration_seconds
+
+where ``#units`` is one of:
+
+* ``"vowels"`` (default) -- count vowel groups (consecutive vowels = 1).
+  This approximates **syllables/second**, the conventional speaking-rate
+  unit. Vowel-group count is far more language-invariant than the total
+  phoneme count: espeak-ng's phoneme inventory size varies wildly between
+  languages (cmn~50 vs en~40 vs ja~25), which made the all-phoneme target
+  effectively language-conditioned and very hard to fit from audio alone.
+* ``"phonemes"`` -- legacy: count every IPA token. Kept for ablations.
 
 The scalar is broadcast to every valid chunk so the per-chunk loss masks
 behave the same as the other prosody teachers. ``chunk_mask`` zeros out the
@@ -46,6 +56,17 @@ _LANG_TO_ESPEAK = {
 
 PhonemeCounter = Callable[[str, str | None], int]
 
+# IPA vowel set covering espeak-ng output across all languages we ship.
+# Includes ASCII vowels, common IPA vowels, rhotic/length-marked variants.
+# Diacritics (ː, ̃, ˞, ˈ, ˌ, etc.) are NOT in this set, so a vowel followed
+# by a length mark still counts as one vowel character; vowel-grouping then
+# collapses adjacent vowels (diphthongs) into a single syllable nucleus.
+_IPA_VOWELS = frozenset(
+    "aeiouyAEIOUY\u00e6\u0251\u0252\u0250\u0254\u0259\u025b"
+    "\u025c\u025d\u025e\u0264\u026f\u0268\u0289\u026a\u028a\u028c"
+    "\u028f\u0259\u0275\u0258\u0153\u00f8\u0276\u025a"
+)
+
 
 @dataclass
 class G2pSpeakingRateConfig:
@@ -55,6 +76,8 @@ class G2pSpeakingRateConfig:
     sample_rate: int = 16000
     default_language: str = "en"
     target_layernorm: bool = False  # scalar target — LN would zero it
+    # "vowels" (syllables/sec) | "phonemes" (legacy phones/sec).
+    count_mode: str = "vowels"
     # Linear target normalisation: out -> (out - target_mean) / target_scale.
     target_mean: float = 0.0
     target_scale: float = 1.0
@@ -70,6 +93,7 @@ def _coerce_config(cfg: Any) -> G2pSpeakingRateConfig:
         "sample_rate",
         "default_language",
         "target_layernorm",
+        "count_mode",
         "target_mean",
         "target_scale",
     )
@@ -78,18 +102,42 @@ def _coerce_config(cfg: Any) -> G2pSpeakingRateConfig:
     return G2pSpeakingRateConfig(**{f: cfg[f] for f in fields if f in cfg})
 
 
+def _count_vowel_groups(ipa: str) -> int:
+    """Count maximal runs of IPA vowel characters in ``ipa``.
+
+    Adjacent vowels (diphthongs like ``aɪ``, ``oʊ``) collapse to one,
+    matching the syllable-nucleus definition of speaking rate.
+    """
+    n = 0
+    in_vowel = False
+    for ch in ipa:
+        if ch in _IPA_VOWELS:
+            if not in_vowel:
+                n += 1
+                in_vowel = True
+        else:
+            in_vowel = False
+    return n
+
+
 class _PhonemizerCounter:
     """Lazy wrapper around :mod:`phonemizer` with one backend per language.
 
-    Counts phonemes by splitting on whitespace after running the espeak
-    backend with a per-phone separator. Falls back to a simple character-
-    based heuristic if phonemizer / espeak-ng is unavailable; this keeps
-    the dataloader from crashing in environments where the backend is not
-    installed (tests / smoke). The fallback is documented in the warning
-    that fires the first time it is used.
+    With ``count_mode='vowels'`` (default) we count vowel groups in the
+    espeak IPA output -- this approximates syllables/second. With
+    ``count_mode='phonemes'`` we count every IPA token (legacy behaviour).
+    Falls back to a simple character heuristic if phonemizer / espeak-ng
+    is unavailable; this keeps the dataloader from crashing in test /
+    smoke environments. The fallback is documented in the warning that
+    fires the first time it is used.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, count_mode: str = "vowels") -> None:
+        if count_mode not in ("vowels", "phonemes"):
+            raise ValueError(
+                f"count_mode must be 'vowels' or 'phonemes'; got {count_mode!r}"
+            )
+        self._count_mode = count_mode
         self._backends: dict[str, Any] = {}
         self._fallback_warned = False
         self._import_error: Exception | None = None
@@ -142,15 +190,16 @@ class _PhonemizerCounter:
 
                 warnings.warn(
                     "phonemizer/espeak-ng is unavailable "
-                    f"({self._import_error!r}); falling back to a whitespace+"
+                    f"({self._import_error!r}); falling back to a vowel-"
                     "character heuristic for speaking-rate targets. Install "
                     "the `teachers` extra and the espeak-ng system package "
-                    "for accurate phoneme counts.",
+                    "for accurate counts.",
                     RuntimeWarning,
                     stacklevel=2,
                 )
                 self._fallback_warned = True
-            # Heuristic: ~1 phoneme per non-space character. Crude but bounded.
+            if self._count_mode == "vowels":
+                return _count_vowel_groups(text.lower())
             return sum(1 for ch in text if not ch.isspace())
         try:
             phonemized = backend.phonemize(
@@ -164,6 +213,8 @@ class _PhonemizerCounter:
         if not phonemized:
             return 0
         joined = phonemized[0]
+        if self._count_mode == "vowels":
+            return _count_vowel_groups(joined)
         # ``Separator(phone=' ', word=' | ')`` produces e.g. ``"h ə l ˈoʊ | w ɝː l d"``.
         # Strip word boundary markers and split on whitespace.
         return sum(1 for tok in joined.replace("|", " ").split() if tok)
@@ -192,7 +243,9 @@ class G2pSpeakingRateTeacher(nn.Module):
             raise ValueError(
                 f"g2p_speaking_rate teacher emits a 1-D scalar; got target_dim={self.target_dim}"
             )
-        self._counter: PhonemeCounter = counter or _PhonemizerCounter()
+        self._counter: PhonemeCounter = counter or _PhonemizerCounter(
+            count_mode=self.cfg.count_mode
+        )
         self._device = torch.device(device) if not isinstance(device, torch.device) else device
 
     @torch.no_grad()
