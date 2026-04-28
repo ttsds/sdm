@@ -76,6 +76,9 @@ uv run python -c "import torch, torch_xla; print('[bootstrap] torch', torch.__ve
 #   - wespeaker-unofficial:   wespeaker_resnet34 (replaces pyannote.audio,
 #                             which had recurring torch / huggingface_hub
 #                             version conflicts with our torch 2.7 pin)
+#   - onnxruntime:            transitive dep of silero-vad, which
+#                             wespeaker-unofficial imports at package
+#                             __init__ time even though we never call VAD
 #   - masked_prosody_model:   mpm (git, no PyPI release)
 # transformers / huggingface-hub / soundfile / librosa are already in core.
 if ! dpkg -s espeak-ng >/dev/null 2>&1; then
@@ -85,6 +88,7 @@ uv pip install \
     phonemizer \
     pyworld \
     wespeaker-unofficial \
+    onnxruntime \
     'masked_prosody_model @ git+https://github.com/MiniXC/masked_prosody_model'
 
 # 6. XLA + wandb env
