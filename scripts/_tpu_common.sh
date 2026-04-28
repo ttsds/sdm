@@ -82,7 +82,7 @@ fi
 uv pip install \
     phonemizer \
     pyworld \
-    'pyannote.audio>=3.1' \
+    'pyannote.audio>=4.0' \
     'masked_prosody_model @ git+https://github.com/MiniXC/masked_prosody_model'
 
 # 6. XLA + wandb env
