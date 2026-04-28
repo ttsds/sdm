@@ -273,14 +273,56 @@ def build_backbone(cfg: BackboneConfig, *, target_dim: int | None = None) -> Dis
     return DistillModel(backbone, layer_idx=cfg.layer_idx, target_dim=target_dim)
 
 
+_HIDDEN_SIZE_TO_MODEL_ID = {
+    768: "utter-project/mHuBERT-147",
+    1024: "facebook/wav2vec2-xls-r-300m",
+}
+
+
+def _infer_backbone_hidden_size(state: dict) -> int | None:
+    """Peek at a known-shape weight to recover the backbone hidden size."""
+    probes = (
+        "backbone.encoder.layer_norm.weight",
+        "backbone.feature_projection.projection.weight",
+        "backbone.masked_spec_embed",
+    )
+    for key in probes:
+        tensor = state.get(key)
+        if torch.is_tensor(tensor) and tensor.ndim >= 1:
+            return int(tensor.shape[0])
+    return None
+
+
 def load_backbone(
     path: str | Path,
     *,
-    model_id: str = DEFAULT_BACKBONE_MODEL_ID,
+    model_id: str | None = None,
     layer_idx: int = -1,
 ) -> DistillModel:
     checkpoint = torch.load(Path(path), map_location="cpu")
     state = checkpoint.get("model", checkpoint)
+
+    # Resolve the HF model_id to instantiate the empty backbone shell. Prefer
+    # an explicit caller override; otherwise infer from the checkpoint's
+    # backbone hidden size so old runs (which don't embed any metadata) still
+    # load even if the per-experiment YAML has since been re-pointed at a
+    # different backbone.
+    inferred_hidden = _infer_backbone_hidden_size(state)
+    inferred_id = (
+        _HIDDEN_SIZE_TO_MODEL_ID.get(inferred_hidden) if inferred_hidden else None
+    )
+    if model_id is None:
+        if inferred_id is None:
+            raise ValueError(
+                f"could not infer backbone model_id from checkpoint at {path} "
+                f"(hidden_size={inferred_hidden}); pass model_id= explicitly"
+            )
+        model_id = inferred_id
+    elif inferred_id is not None and inferred_id != model_id:
+        # Caller-supplied model_id disagrees with the checkpoint shape (likely
+        # the YAML was edited post-training). Trust the checkpoint.
+        model_id = inferred_id
+
     backbone = AutoModel.from_pretrained(model_id, **hf_token_kwargs())
     _strip_pos_conv_weight_norm(backbone)
     model = DistillModel(backbone, layer_idx=layer_idx)
