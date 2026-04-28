@@ -20,6 +20,7 @@ teacher:
   target_dim: 256
   pooled: chunked
   target_layernorm: true
+  loss: cos                       # speaker embeddings: direction-only, magnitude is meaningless
 
 data:
   repo_id: amphion/Emilia-Dataset

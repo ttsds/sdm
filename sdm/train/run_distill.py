@@ -36,6 +36,7 @@ class TeacherConfig:
     cache_dir: str | None = None
     target_layernorm: bool = True
     # Distillation loss: "cos_l1" (default, dense embeddings),
+    # "cos" (direction-only, e.g. speaker embeddings),
     # "l1" (scalar regression), or "mse".
     loss: str = "cos_l1"
     # Optional, teacher-specific extras (e.g. g2p speaking-rate, pyworld_f0).
@@ -201,6 +202,26 @@ def _masked_l1(pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tenso
     l1_per_token = (pred_f - target_f).abs().mean(dim=-1) * mask
     denom = torch.clamp(mask.sum(), min=1.0)
     return l1_per_token.sum() / denom
+
+
+def _masked_cos(
+    pred: torch.Tensor, target: torch.Tensor, chunk_mask: torch.Tensor
+) -> torch.Tensor:
+    """Direction-only cosine distillation loss.
+
+    For every masked token position computes ``1 - cos(pred, target)`` and
+    averages over masked positions. Magnitude carries no information for
+    speaker-embedding teachers (dvector, wespeaker) where only direction
+    on the unit hypersphere encodes speaker identity, so dropping the L1
+    term avoids penalising the student for arbitrary scale differences.
+    """
+    pred_f = pred.float()
+    target_f = target.float()
+    mask = chunk_mask.to(pred_f.dtype)
+    cos = torch.nn.functional.cosine_similarity(pred_f, target_f, dim=-1, eps=1e-6)
+    cos_per_token = (1.0 - cos) * mask
+    denom = torch.clamp(mask.sum(), min=1.0)
+    return cos_per_token.sum() / denom
 
 
 def _masked_cos_l1(
@@ -395,6 +416,9 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             else:
                 loss_terms = None
                 loss = _masked_cos_l1(pred, target, chunk_mask) / cfg.train.grad_accum
+        elif loss_kind == "cos":
+            loss_terms = None
+            loss = _masked_cos(pred, target, chunk_mask) / cfg.train.grad_accum
         elif loss_kind == "l1":
             loss_terms = None
             loss = _masked_l1(pred, target, chunk_mask) / cfg.train.grad_accum
