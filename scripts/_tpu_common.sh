@@ -79,6 +79,8 @@ uv run python -c "import torch, torch_xla; print('[bootstrap] torch', torch.__ve
 #   - onnxruntime:            transitive dep of silero-vad, which
 #                             wespeaker-unofficial imports at package
 #                             __init__ time even though we never call VAD
+#   - funasr:                 emotion2vec (AutoModel wrapper -- canonical
+#                             loader maintained by the model authors)
 #   - masked_prosody_model:   mpm (git, no PyPI release)
 # transformers / huggingface-hub / soundfile / librosa are already in core.
 if ! dpkg -s espeak-ng >/dev/null 2>&1; then
@@ -89,6 +91,7 @@ uv pip install \
     pyworld \
     wespeaker-unofficial \
     onnxruntime \
+    funasr \
     'masked_prosody_model @ git+https://github.com/MiniXC/masked_prosody_model'
 
 # 6. XLA + wandb env

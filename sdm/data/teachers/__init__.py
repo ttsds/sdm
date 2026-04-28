@@ -60,6 +60,10 @@ def build_teacher(cfg: Any, *, device: torch.device | str = "cpu") -> Teacher:
         from sdm.data.teachers.wespeaker import WespeakerResnet34Teacher
 
         return WespeakerResnet34Teacher(cfg, device=device)
+    if kind == "emotion2vec":
+        from sdm.data.teachers.emotion2vec import Emotion2vecTeacher
+
+        return Emotion2vecTeacher(cfg, device=device)
     if kind == "mpm":
         from sdm.data.teachers.mpm import MpmTeacher
 

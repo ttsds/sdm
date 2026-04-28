@@ -1,0 +1,57 @@
+# sdm-emotion2vec: distill emotion2vec utterance embeddings into XLS-R 300M.
+# Backed by FunASR's AutoModel wrapper around iic/emotion2vec_base (the
+# universal pretrained 768-d emotion representation, no fine-tuning).
+# emotion2vec runs on the TPU host CPU inside the no-grad teacher pass --
+# its internal batch size is 1 so we benefit from chunk parallelism only
+# at the call-site level, not inside the model.
+
+experiment: sdm-emotion2vec
+
+backbone:
+  kind: fairseq_w2v2
+  model_id: facebook/wav2vec2-xls-r-300m
+  hidden_size: 1024
+  layer_idx: -1
+
+teacher:
+  kind: emotion2vec
+  model_id: iic/emotion2vec_base
+  hub: hf                          # "hf" (HuggingFace) or "ms" (modelscope)
+  in_loop: true
+  cache_dir: null
+  target_dim: 768
+  pooled: chunked                  # one utterance embedding per chunk
+  target_layernorm: true
+  loss: cos_l1                     # dense embedding: cosine + L1 magnitude
+  sample_rate: 16000
+
+data:
+  repo_id: amphion/Emilia-Dataset
+  split: train
+  streaming: true
+  shuffle_buffer: 10000
+  seed: 0
+  fraction: 0.1
+  sample_rate: 16000
+  chunk_seconds: 1.0
+  max_chunks: 32
+  num_workers: 4
+
+train:
+  batch_size: 4
+  grad_accum: 4
+  lr: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 1000
+  total_steps: 30000
+  log_every: 50
+  ckpt_every: 5000
+  ckpt_dir: gs://sdm-ckpts/sdm-emotion2vec
+  resume_from_latest: true
+  fsdp: false
+  seed: 0
+  wandb:
+    enabled: true
+    project: sdm
+    run_name: sdm-emotion2vec-10pct
+    tags: [finetune, multilingual, 10pct, v6e-8, emotion]

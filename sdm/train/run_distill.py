@@ -48,6 +48,8 @@ class TeacherConfig:
     f0_floor: float | None = None
     f0_ceil: float | None = None
     teacher_sample_rate: int | None = None
+    # FunASR AutoModel hub: "hf" (default) or "ms" -- emotion2vec teacher.
+    hub: str | None = None
     # Linear target normalisation applied inside scalar teachers
     # (pyworld_f0, g2p_speaking_rate). out -> (out - mean) / scale.
     target_mean: float | None = None
