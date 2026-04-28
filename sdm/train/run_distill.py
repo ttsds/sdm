@@ -43,6 +43,7 @@ class TeacherConfig:
     chunk_seconds: float | None = None
     sample_rate: int | None = None
     default_language: str | None = None
+    count_mode: str | None = None
     frame_period_ms: float | None = None
     f0_floor: float | None = None
     f0_ceil: float | None = None
