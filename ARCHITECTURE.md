@@ -34,7 +34,7 @@
                   ckpt every N steps to gs://, W&B if enabled
 ```
 
-The student is **XLS-R 300M** in every production config. The teacher is whatever `cfg.teacher.kind` resolves to — that is the only thing that varies across the eight finetune configs.
+The student is **XLS-R 300M** in every production config. The teacher is whatever `cfg.teacher.kind` resolves to — that is the only thing that varies across the nine finetune configs (eight TTSDS2 teachers plus emotion2vec).
 
 ## Teacher protocol
 
@@ -83,16 +83,16 @@ The TTSDS2 paper groups speech feature extractors into four **factors**. The SDM
 
 | Factor | Teacher (paper) | SDM config | SDM teacher kind | Status |
 |---|---|---|---|---|
-| Generic | mHuBERT-147 (multilingual HuBERT) | `finetune_xlsr_fairseq.yaml` | `hf_ssl` | **live** |
+| Generic | mHuBERT-147 (multilingual HuBERT) | `finetune_xlsr.yaml` | `hf_ssl` | trained |
 | Generic | WavLM activations | (covered by mHuBERT for now) | — | deferred |
-| Speaker | d-Vector | `finetune_dvector.yaml` | `dvector_torchscript` | implemented |
-| Speaker | WeSpeaker (ResNet34) | `finetune_wespeaker.yaml` | `wespeaker_resnet34` | implemented |
-| Prosody | WORLD F0 (mean per chunk) | `finetune_pitch.yaml` | `pyworld_f0` | implemented |
-| Prosody | Masked Prosody Model L7 | `finetune_mpm.yaml` | `mpm` | implemented |
-| Prosody | Speaking rate (G2P phones / sec) | `finetune_speaking_rate.yaml` | `g2p_speaking_rate` | implemented (replaces Allosaurus) |
-| Intelligibility | wav2vec 2.0 ASR encoder | `finetune_w2v2_asr.yaml` | `hf_ctc` | implemented |
-| Intelligibility | Whisper-small encoder (multilingual) | `finetune_mwhisper.yaml` | `whisper_encoder` | implemented |
-| (Outside paper) | emotion2vec | not yet scaffolded | — | future |
+| Speaker | d-Vector | `finetune_dvector.yaml` | `dvector_torchscript` | trained |
+| Speaker | WeSpeaker (ResNet34) | `finetune_wespeaker.yaml` | `wespeaker_resnet34` | trained |
+| Prosody | WORLD F0 (mean per chunk) | `finetune_pitch.yaml` | `pyworld_f0` | trained |
+| Prosody | Masked Prosody Model L7 | `finetune_mpm.yaml` | `mpm` | trained |
+| Prosody | Speaking rate (G2P syllables / sec) | `finetune_speaking_rate.yaml` | `g2p_speaking_rate` | trained (replaces Allosaurus) |
+| Intelligibility | wav2vec 2.0 ASR encoder | `finetune_w2v2_asr.yaml` | `hf_ctc` | trained |
+| Intelligibility | Whisper-small encoder (multilingual) | `finetune_mwhisper.yaml` | `whisper_encoder` | trained |
+| (Outside paper) | emotion2vec (FunASR base) | `finetune_emotion2vec.yaml` | `emotion2vec` | trained |
 
 XLS-R itself is not in the table because it is the **backbone**; its representations are what we are reshaping via finetuning, not a target to predict.
 
@@ -109,15 +109,14 @@ The same patterns apply when you add a new Teacher whose model gets _trained_ on
 
 ## Loss
 
-Defined inline in `sdm/train/run_distill.py:_masked_cos_l1`:
+The training loop dispatches on `teacher.loss` in the YAML. Three modes
+live in `sdm/train/run_distill.py`:
 
-```
-loss = 0.5 · (1 − cosine(pred, target))
-     + 0.5 · mean |pred − target|
-       — masked by chunk_mask, summed across (B, N_chunks)
-```
+- **`cos_l1`** (default, dense embeddings): `0.5·(1 − cos(pred, target)) + 0.5·mean|pred − target|`. The cosine term is direction-only; the L1 term anchors magnitudes so the student doesn't collapse onto the unit sphere. Implemented as `_masked_cos_l1`.
+- **`cos`** (direction-only embeddings: d-Vector, WeSpeaker): `1 − cos(pred, target)`. Speaker embeddings are L2-normalised by construction, so magnitude carries no information.
+- **`l1`** (1-D scalar targets: pitch, speaking-rate): `mean|pred − target|`. Cosine is degenerate on a scalar.
 
-The cosine term is direction-only (good when the teacher's magnitude is uninformative); the L1 term keeps magnitudes anchored so the student doesn't collapse onto the unit sphere. We tried straight MSE, LayerNorm-then-MSE, and pure cosine — this 50/50 blend was the most stable on bf16 XLA. The teacher's `target_layernorm: true` knob is the matching anchor on the target side.
+All variants are masked by `chunk_mask`, summed across `(B, N_chunks)`, then divided by the unmasked chunk count. The teacher's `target_layernorm` knob (and, for scalar teachers, the `target_mean` / `target_scale` knobs) is the matching anchor on the target side. We picked these blends after trying straight MSE, LayerNorm-then-MSE, and pure cosine; the configured per-teacher choice was the most stable on bf16 XLA in each case.
 
 ## Checkpoints
 

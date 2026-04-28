@@ -29,4 +29,4 @@ teacher_cache/
 .vscode/
 *.swp
 .DS_Store
-.tpu/
+.tpu/logs/
