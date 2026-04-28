@@ -4,7 +4,7 @@ For every pair (i, j) over the finetuned SDM_i and the matching teacher
 representations, fit a linear probe from SDM_i's chunk-level latents to
 teacher_j's chunk-level targets and record R^2 on a held-out split.
 
-Default data: 100 utterances from ``mythicinfinity/libritts dev.clean``.
+Default data: 500 utterances from ``mythicinfinity/libritts dev.clean``.
 Small probe set deliberately — this is a sanity check on the factor
 groupings, not a precision benchmark. Switch to a larger split or to
 multilingual data once the matrix shape stabilises.
@@ -34,7 +34,7 @@ import torch
 import yaml
 from sklearn.linear_model import Ridge
 from sklearn.metrics import r2_score
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import GroupShuffleSplit
 from tqdm.auto import tqdm
 
 try:
@@ -106,6 +106,26 @@ def _flatten_valid(features: torch.Tensor, mask: torch.Tensor) -> np.ndarray:
     """``features``: (B, N_chunks, D); ``mask``: (B, N_chunks). Return (n_valid, D)."""
     valid = features[mask]
     return valid.detach().to(torch.float32).cpu().numpy()
+
+
+def chunk_groups(held_out: list[dict]) -> np.ndarray:
+    """Per-valid-chunk array of utterance indices (parallel to flattened features).
+
+    Used by ``fit_probe`` to make sure every chunk of a given utterance lands
+    on the same side of the train/test split. Without this, broadcast targets
+    (speaking_rate, pitch when an utterance has constant F0, …) leak — train
+    sees the target value Ridge needs to recover and the test set inherits
+    the same utterance's chunks.
+    """
+    groups: list[int] = []
+    for utt_idx, record in enumerate(held_out):
+        mask = record["chunk_mask"]
+        if hasattr(mask, "sum"):
+            n_valid = int(mask.sum().item() if hasattr(mask.sum(), "item") else mask.sum())
+        else:
+            n_valid = int(np.asarray(mask).sum())
+        groups.extend([utt_idx] * n_valid)
+    return np.asarray(groups, dtype=np.int64)
 
 
 def encode_with_backbone(
@@ -199,7 +219,15 @@ def _fmt_report(rep: dict) -> str:
     )
 
 
-def fit_probe(x: np.ndarray, y: np.ndarray, *, alpha: float = 1.0) -> dict:
+def fit_probe(
+    x: np.ndarray,
+    y: np.ndarray,
+    groups: np.ndarray,
+    *,
+    alpha: float = 1.0,
+    test_size: float = 0.2,
+    random_state: int = 0,
+) -> dict:
     # Drop rows where either side contains non-finite values. Some teachers
     # (e.g. pitch / speaking-rate) emit NaN for silent / undefined chunks and
     # the backbone can produce NaN/Inf if the fp16 forward overflows; sklearn
@@ -214,27 +242,37 @@ def fit_probe(x: np.ndarray, y: np.ndarray, *, alpha: float = 1.0) -> dict:
     if n_dropped:
         x = x[finite]
         y = y[finite]
-    if x.shape[0] < 4:
+        groups = groups[finite]
+    base = {
+        "n_dropped": n_dropped,
+        "n_dropped_x_only": n_dropped_x_only,
+        "n_dropped_y_only": n_dropped_y_only,
+        "n_dropped_both": n_dropped_both,
+        "split": "group_by_utterance",
+    }
+    n_groups = int(np.unique(groups).size) if groups.size else 0
+    if x.shape[0] < 4 or n_groups < 2:
         return {
             "r2_train": float("nan"),
             "r2_test": float("nan"),
             "n_test": int(x.shape[0]),
-            "n_dropped": n_dropped,
-            "n_dropped_x_only": n_dropped_x_only,
-            "n_dropped_y_only": n_dropped_y_only,
-            "n_dropped_both": n_dropped_both,
+            "n_groups_train": 0,
+            "n_groups_test": n_groups,
+            **base,
         }
-    x_tr, x_te, y_tr, y_te = train_test_split(x, y, test_size=0.2, random_state=0)
+    splitter = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=random_state)
+    train_idx, test_idx = next(splitter.split(x, y, groups))
+    x_tr, x_te = x[train_idx], x[test_idx]
+    y_tr, y_te = y[train_idx], y[test_idx]
     model = Ridge(alpha=alpha)
     model.fit(x_tr, y_tr)
     return {
         "r2_train": float(r2_score(y_tr, model.predict(x_tr), multioutput="uniform_average")),
         "r2_test": float(r2_score(y_te, model.predict(x_te), multioutput="uniform_average")),
         "n_test": int(len(x_te)),
-        "n_dropped": n_dropped,
-        "n_dropped_x_only": n_dropped_x_only,
-        "n_dropped_y_only": n_dropped_y_only,
-        "n_dropped_both": n_dropped_both,
+        "n_groups_train": int(np.unique(groups[train_idx]).size),
+        "n_groups_test": int(np.unique(groups[test_idx]).size),
+        **base,
     }
 
 
@@ -254,7 +292,7 @@ def main() -> None:
                     help="HF dataset config name (e.g. dev/clean/other/all for libritts)")
     ap.add_argument("--split", default="dev.clean",
                     help="dataset split (e.g. dev.clean / test.clean / train)")
-    ap.add_argument("--probe-utterances", type=int, default=100)
+    ap.add_argument("--probe-utterances", type=int, default=500)
     ap.add_argument("--batch-size", type=int, default=4,
                     help="utterances per forward pass")
     ap.add_argument("--layer-sweep", action="store_true",
@@ -286,6 +324,9 @@ def main() -> None:
     )
     print(f"[probe] held_out={len(held_out)} utterances "
           f"({sum(int(r['n_chunks']) for r in held_out)} valid chunks)")
+    groups = chunk_groups(held_out)
+    print(f"[probe] chunk_groups: {groups.size} chunks across {np.unique(groups).size} utterances "
+          f"(min/max chunks per utt: {np.bincount(groups).min()}/{np.bincount(groups).max()})")
 
     # Pre-compute teacher targets once (shared across SDM_i). Build, run, drop.
     target_matrix: dict[str, np.ndarray] = {}
@@ -368,7 +409,7 @@ def main() -> None:
                     raise RuntimeError(
                         f"chunk count mismatch: {sdm_exp}@L{layer} x={x.shape} vs {tgt_exp} y={y.shape}"
                     )
-                probe = fit_probe(x, y)
+                probe = fit_probe(x, y, groups)
                 results.append({
                     "sdm": sdm_exp,
                     "layer": int(layer),

@@ -1,0 +1,44 @@
+# Probe matrix summary  (8 experiments × 25 layers)
+
+Diagonal (self-prediction): each SDM_i predicting its own teacher target
+at the best layer.
+
+| backbone | best layer | best R²_test |
+|---|---:|---:|
+| sdm-xlsr-fairseq | 24 | +0.233 |
+| sdm-dvector | 0 | +0.444 |
+| sdm-mpm | 24 | +0.286 |
+| sdm-pitch | 24 | +0.358 |
+| sdm-speaking-rate | 0 | +1.000 |
+| sdm-mwhisper | 24 | +0.153 |
+| sdm-w2v2-asr | 24 | +0.257 |
+| sdm-emotion2vec | 24 | +0.095 |
+
+Off-diagonal: top 5 strongest cross-teacher predictions (R²_test, best layer).
+      sdm-xlsr-fairseq → sdm-speaking-rate     R²=+1.000  L0
+          sdm-w2v2-asr → sdm-speaking-rate     R²=+1.000  L0
+             sdm-pitch → sdm-speaking-rate     R²=+1.000  L0
+          sdm-mwhisper → sdm-speaking-rate     R²=+1.000  L0
+               sdm-mpm → sdm-speaking-rate     R²=+1.000  L0
+
+Bottom 5 weakest cross-teacher predictions:
+          sdm-w2v2-asr → sdm-emotion2vec       R²=+0.094  L24
+               sdm-mpm → sdm-emotion2vec       R²=+0.092  L24
+     sdm-speaking-rate → sdm-emotion2vec       R²=+0.087  L24
+             sdm-pitch → sdm-emotion2vec       R²=+0.086  L24
+           sdm-dvector → sdm-emotion2vec       R²=+0.086  L24
+
+Factor block (mean R² over best-layer cells, grouped by factor):
+
+target_factor    Generic  Speaker  Prosody  Intelligibility  Emotion
+sdm_factor                                                          
+Generic            0.233    0.444    0.572            0.212    0.096
+Speaker            0.199    0.444    0.543            0.182    0.086
+Prosody            0.205    0.444    0.548            0.188    0.088
+Intelligibility    0.225    0.444    0.563            0.206    0.094
+Emotion            0.231    0.444    0.575            0.208    0.095
+
+Per-row argmax-layer histogram (where each backbone peaks across all targets):
+  L 0:  16  ################
+  L24:  48  ################################################
+

@@ -38,7 +38,7 @@ uv run python scripts/run_linear_probes.py \
     --consolidated "$CKPT_DIR" \
     --dataset "${SDM_PROBE_DATASET:-mythicinfinity/libritts}" \
     --split "${SDM_PROBE_SPLIT:-dev.clean}" \
-    --probe-utterances "${SDM_PROBE_UTTERANCES:-100}" \
+    --probe-utterances "${SDM_PROBE_UTTERANCES:-500}" \
     --batch-size "${SDM_PROBE_BATCH_SIZE:-4}" \
     --device "${SDM_PROBE_DEVICE:-cpu}" \
     --layer-sweep \
