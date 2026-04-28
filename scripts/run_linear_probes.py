@@ -492,8 +492,10 @@ def main() -> None:
     if args.wandb:
         import wandb  # noqa: PLC0415
 
-        wandb.init(project="sdm", name="cross-probe-matrix", job_type="probe")
+        run = wandb.init(project="sdm", name=f"probe-{args.out.name}", job_type="probe")
         wandb.log({"results": wandb.Table(columns=list(results[0]), data=[list(r.values()) for r in results])})
+        # Write run ID so analyze_probes.py can resume this run and attach images.
+        (args.out / "wandb_run_id.txt").write_text(run.id)
         wandb.finish()
 
 

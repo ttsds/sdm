@@ -45,6 +45,7 @@ teachers = [
 # per the PyTorch/XLA release matrix.
 tpu = []
 tracking = ["wandb"]
+probes = ["scikit-learn", "matplotlib", "pandas"]
 dev = [
   "pytest>=7",
   "pytest-cov",

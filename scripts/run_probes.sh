@@ -11,6 +11,9 @@ export CONFIG='configs/finetune_xlsr.yaml'   # used by _tpu_common.sh sanity che
 # shellcheck disable=SC1091
 source "$(dirname "$0")/_tpu_common.sh"
 
+# Install probe/analysis deps on top of what _tpu_common.sh synced.
+uv sync --extra probes --extra tracking --quiet
+
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_DIR="runs/probes/${RUN_ID}"
 CKPT_DIR="checkpoints/consolidated"
@@ -45,8 +48,18 @@ uv run python scripts/run_linear_probes.py \
     --out "$OUT_DIR" \
     ${WANDB_API_KEY:+--wandb}
 
-echo "[$EXPERIMENT] uploading matrix to $GCS_DEST"
-gsutil -q cp "$OUT_DIR/matrix.json" "$GCS_DEST/matrix.json"
-gsutil -q cp -r "$CKPT_DIR/manifest.json" "$GCS_DEST/manifest.json"
+echo "[$EXPERIMENT] running analysis -> $OUT_DIR"
+uv run python scripts/analyze_probes.py \
+    --matrix "$OUT_DIR/matrix.json" \
+    --out "$OUT_DIR" \
+    ${WANDB_API_KEY:+--wandb} \
+    --wandb-project sdm
 
-echo "[$EXPERIMENT] done; matrix at $GCS_DEST/matrix.json"
+echo "[$EXPERIMENT] uploading artefacts to $GCS_DEST"
+gsutil -q cp "$OUT_DIR/matrix.json"          "$GCS_DEST/matrix.json"
+gsutil -q cp "$CKPT_DIR/manifest.json"       "$GCS_DEST/manifest.json"
+gsutil -q cp "$OUT_DIR/summary.txt"          "$GCS_DEST/summary.txt"
+gsutil -q cp "$OUT_DIR/r2_full_long.csv"     "$GCS_DEST/r2_full_long.csv"
+gsutil -q rsync -r "$OUT_DIR" "$GCS_DEST"
+
+echo "[$EXPERIMENT] done; artefacts at $GCS_DEST"
