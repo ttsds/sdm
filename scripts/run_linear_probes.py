@@ -201,10 +201,20 @@ def main() -> None:
             torch.cuda.empty_cache()
 
     # Sweep latents per (sdm_exp, layer); fit probes against every target.
+    backbone_model_ids: dict[str, str] = {}
     results = []
     for sdm_exp in experiments:
         ckpt = args.consolidated / sdm_exp / "backbone.pt"
         backbone = load_backbone(ckpt, model_id=_backbone_model_id(sdm_exp))
+        actual_id = getattr(backbone.backbone.config, "_name_or_path", None) or \
+            f"hidden_size={backbone.backbone.config.hidden_size}"
+        configured_id = _backbone_model_id(sdm_exp)
+        backbone_model_ids[sdm_exp] = str(actual_id)
+        if str(actual_id) != configured_id:
+            print(
+                f"[probe] WARNING: {sdm_exp} checkpoint backbone is {actual_id!r} "
+                f"but YAML specifies {configured_id!r}"
+            )
         backbone.to(device)
         layer_count = backbone.num_hidden_layers
         layers = range(layer_count + 1) if args.layer_sweep else [layer_count]
@@ -233,6 +243,17 @@ def main() -> None:
 
     (args.out / "matrix.json").write_text(json.dumps(results, indent=2))
     print(f"[done] {len(results)} probes -> {args.out / 'matrix.json'}")
+
+    # Summary of any backbone/yaml mismatches detected during the sweep.
+    mismatched = {
+        exp: actual
+        for exp, actual in backbone_model_ids.items()
+        if actual != _backbone_model_id(exp)
+    }
+    if mismatched:
+        print("[probe] backbone/YAML mismatches:")
+        for exp, actual in mismatched.items():
+            print(f"        {exp:>20s}  ckpt={actual}  yaml={_backbone_model_id(exp)}")
 
     if args.wandb:
         import wandb  # noqa: PLC0415

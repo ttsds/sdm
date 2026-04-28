@@ -321,6 +321,11 @@ def load_backbone(
     elif inferred_id is not None and inferred_id != model_id:
         # Caller-supplied model_id disagrees with the checkpoint shape (likely
         # the YAML was edited post-training). Trust the checkpoint.
+        print(
+            f"[load_backbone] WARNING: checkpoint {path} has hidden_size="
+            f"{inferred_hidden} (-> {inferred_id}) but caller requested "
+            f"model_id={model_id!r}; loading {inferred_id!r} from checkpoint instead"
+        )
         model_id = inferred_id
 
     backbone = AutoModel.from_pretrained(model_id, **hf_token_kwargs())
