@@ -35,6 +35,7 @@ import yaml
 from sklearn.linear_model import Ridge
 from sklearn.metrics import r2_score
 from sklearn.model_selection import GroupShuffleSplit
+from sklearn.neural_network import MLPRegressor
 from tqdm.auto import tqdm
 
 try:
@@ -219,12 +220,36 @@ def _fmt_report(rep: dict) -> str:
     )
 
 
+def _build_estimator(probe_type: str, *, alpha: float = 1.0, mlp_hidden: int = 256,
+                     random_state: int = 0):
+    if probe_type == "ridge":
+        return Ridge(alpha=alpha)
+    if probe_type == "mlp":
+        # One hidden layer, 256 units — standard in speech probing literature
+        # (SUPERB, layer-wise analysis papers). Early stopping on 10% of the
+        # training set so we don't overfit on the ~2000-chunk probe set.
+        return MLPRegressor(
+            hidden_layer_sizes=(mlp_hidden,),
+            activation="relu",
+            solver="adam",
+            learning_rate_init=1e-3,
+            max_iter=500,
+            early_stopping=True,
+            validation_fraction=0.1,
+            n_iter_no_change=15,
+            random_state=random_state,
+        )
+    raise ValueError(f"unknown probe_type {probe_type!r}; choose 'ridge' or 'mlp'")
+
+
 def fit_probe(
     x: np.ndarray,
     y: np.ndarray,
     groups: np.ndarray,
     *,
+    probe_type: str = "ridge",
     alpha: float = 1.0,
+    mlp_hidden: int = 256,
     test_size: float = 0.2,
     random_state: int = 0,
 ) -> dict:
@@ -244,6 +269,7 @@ def fit_probe(
         y = y[finite]
         groups = groups[finite]
     base = {
+        "probe_type": probe_type,
         "n_dropped": n_dropped,
         "n_dropped_x_only": n_dropped_x_only,
         "n_dropped_y_only": n_dropped_y_only,
@@ -264,7 +290,8 @@ def fit_probe(
     train_idx, test_idx = next(splitter.split(x, y, groups))
     x_tr, x_te = x[train_idx], x[test_idx]
     y_tr, y_te = y[train_idx], y[test_idx]
-    model = Ridge(alpha=alpha)
+    model = _build_estimator(probe_type, alpha=alpha, mlp_hidden=mlp_hidden,
+                             random_state=random_state)
     model.fit(x_tr, y_tr)
     return {
         "r2_train": float(r2_score(y_tr, model.predict(x_tr), multioutput="uniform_average")),
@@ -295,6 +322,11 @@ def main() -> None:
     ap.add_argument("--probe-utterances", type=int, default=500)
     ap.add_argument("--batch-size", type=int, default=4,
                     help="utterances per forward pass")
+    ap.add_argument("--probe-types", nargs="+", default=["ridge", "mlp"],
+                    choices=["ridge", "mlp"],
+                    help="which probe types to fit (default: ridge mlp)")
+    ap.add_argument("--mlp-hidden", type=int, default=256,
+                    help="hidden units in the MLP probe (default: 256)")
     ap.add_argument("--layer-sweep", action="store_true",
                     help="probe every backbone layer; otherwise just the configured one")
     ap.add_argument("--out", type=Path, required=True)
@@ -409,17 +441,18 @@ def main() -> None:
                     raise RuntimeError(
                         f"chunk count mismatch: {sdm_exp}@L{layer} x={x.shape} vs {tgt_exp} y={y.shape}"
                     )
-                probe = fit_probe(x, y, groups)
-                results.append({
-                    "sdm": sdm_exp,
-                    "layer": int(layer),
-                    "target": tgt_exp,
-                    **probe,
-                })
-                print(
-                    f"{sdm_exp:>20s} L{layer:>2}  ->  {tgt_exp:<20s}  "
-                    f"R2_test={probe['r2_test']:+.3f}"
-                )
+                for probe_type in args.probe_types:
+                    probe = fit_probe(x, y, groups, probe_type=probe_type,
+                                      mlp_hidden=args.mlp_hidden)
+                    results.append({
+                        "sdm": sdm_exp,
+                        "layer": int(layer),
+                        "target": tgt_exp,
+                        **probe,
+                    })
+                latest = {r["probe_type"]: r["r2_test"] for r in results[-len(args.probe_types):]}
+                scores = "  ".join(f"{pt}={latest[pt]:+.3f}" for pt in args.probe_types)
+                print(f"{sdm_exp:>20s} L{layer:>2}  ->  {tgt_exp:<20s}  {scores}")
             print(
                 f"[time] {sdm_exp} L{layer} probes ({len(target_matrix)} targets): "
                 f"{time.perf_counter() - t_layer_probes:.2f}s"
