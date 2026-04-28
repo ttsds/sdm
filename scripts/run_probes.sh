@@ -17,7 +17,7 @@ CKPT_DIR="checkpoints/consolidated"
 GCS_DEST="gs://sdm-ckpts/probes/${RUN_ID}"
 
 EXPERIMENTS=(
-    sdm-xlsr            # mHuBERT-147 generic
+    sdm-xlsr-fairseq    # XLS-R 300M generic backbone (fairseq-init)
     sdm-dvector         # speaker
     sdm-pitch           # prosody — F0
     sdm-mpm             # prosody — MPM L7
