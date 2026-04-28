@@ -73,7 +73,9 @@ uv run python -c "import torch, torch_xla; print('[bootstrap] torch', torch.__ve
 # experiment without per-config branching.
 #   - phonemizer + espeak-ng: g2p_speaking_rate
 #   - pyworld:                pyworld_f0
-#   - pyannote.audio:         wespeaker_resnet34
+#   - wespeaker-unofficial:   wespeaker_resnet34 (replaces pyannote.audio,
+#                             which had recurring torch / huggingface_hub
+#                             version conflicts with our torch 2.7 pin)
 #   - masked_prosody_model:   mpm (git, no PyPI release)
 # transformers / huggingface-hub / soundfile / librosa are already in core.
 if ! dpkg -s espeak-ng >/dev/null 2>&1; then
@@ -82,8 +84,7 @@ fi
 uv pip install \
     phonemizer \
     pyworld \
-    'pyannote.audio>=3.1,<4' \
-    'huggingface_hub<1.0' \
+    wespeaker-unofficial \
     'masked_prosody_model @ git+https://github.com/MiniXC/masked_prosody_model'
 
 # 6. XLA + wandb env

@@ -1,13 +1,21 @@
-"""WeSpeaker ResNet34 speaker-embedding teacher.
+"""WeSpeaker speaker-embedding teacher.
 
-The pyannote release ``pyannote/wespeaker-voxceleb-resnet34-LM`` ships a
-``pytorch_model.bin`` plus a config that wraps a WeSpeaker ResNet34
-embedding model. The native ``pyannote.audio.Inference`` runs on CPU
-and is too slow for in-loop distillation; this teacher loads the bare
-``pyannote.audio.Model`` (or any compatible ``nn.Module``) directly so
-it runs on the training accelerator.
+Backed by `MiniXC/wespeaker-unofficial-pypi`_ (a fork of WeNet's
+`wespeaker`_ packaged on PyPI). The package's ``wespeaker.load_model``
+returns a ``Speaker`` object whose ``.model`` attribute is a bare
+``nn.Module`` embedding network ingesting Kaldi-style log-mel fbank
+features. We expose that bare module as a per-chunk teacher: each chunk
+is converted to fbank on CPU (``kaldi.fbank`` has no XLA implementation),
+batched, and pushed through the embedding network on the configured
+device. Output: ``(B, N_chunks, target_dim)``.
 
-Each chunk is embedded independently. Output: ``(B, N_chunks, target_dim)``.
+Default ``model_id`` is ``vblinkf`` -- the multilingual VoxBlink2 +
+VoxCeleb2 fine-tuned SimAMResNet34, which beats the English-only
+``pyannote/wespeaker-voxceleb-resnet34-LM`` checkpoint we used previously
+on non-English data.
+
+.. _MiniXC/wespeaker-unofficial-pypi: https://github.com/MiniXC/wespeaker-unofficial-pypi
+.. _wespeaker: https://github.com/wenet-e2e/wespeaker
 """
 
 from __future__ import annotations
@@ -18,22 +26,44 @@ from typing import Any
 import torch
 from torch import nn
 
-from sdm.dotenv import hf_token_kwargs
-
 
 @dataclass
 class WespeakerResnet34Config:
-    model_id: str = "pyannote/wespeaker-voxceleb-resnet34-LM"
+    # wespeaker.cli.hub.Hub.Assets keys: "chinese", "english", "campplus",
+    # "eres2net", "vblinkp", "vblinkf". "vblinkf" is the multilingual
+    # SimAMResNet34 fine-tuned on VoxCeleb2.
+    model_id: str = "vblinkf"
     target_dim: int = 256
     pooled: str = "chunked"
     sample_rate: int = 16000
     target_layernorm: bool = True
+    # WeSpeaker's CLI computes Kaldi fbank on int16-scale waveforms (the
+    # default torchaudio.load(normalize=False) output). Our pipeline hands
+    # in float32 [-1, 1] so we rescale before fbank to match the training
+    # distribution. Models marked wavform_norm=True (campplus, eres2net)
+    # were trained on float32 directly; set this to 1.0 for those.
+    waveform_scale: float = 32768.0
+    num_mel_bins: int = 80
+    frame_length_ms: float = 25.0
+    frame_shift_ms: float = 10.0
+    cmn: bool = True
 
 
 def _coerce_config(cfg: Any) -> WespeakerResnet34Config:
     if isinstance(cfg, WespeakerResnet34Config):
         return cfg
-    fields = ("model_id", "target_dim", "pooled", "sample_rate", "target_layernorm")
+    fields = (
+        "model_id",
+        "target_dim",
+        "pooled",
+        "sample_rate",
+        "target_layernorm",
+        "waveform_scale",
+        "num_mel_bins",
+        "frame_length_ms",
+        "frame_shift_ms",
+        "cmn",
+    )
     if hasattr(cfg, "kind"):
         return WespeakerResnet34Config(
             **{f: getattr(cfg, f) for f in fields if hasattr(cfg, f) and getattr(cfg, f) is not None}
@@ -41,46 +71,23 @@ def _coerce_config(cfg: Any) -> WespeakerResnet34Config:
     return WespeakerResnet34Config(**{f: cfg[f] for f in fields if f in cfg})
 
 
-def _load_pyannote_wespeaker(model_id: str) -> nn.Module:
-    """Load the bare embedding nn.Module from a pyannote checkpoint.
+def _load_wespeaker_model(model_id: str) -> nn.Module:
+    """Load the bare embedding nn.Module from wespeaker-unofficial.
 
-    The auth-token kwarg name has churned across pyannote.audio versions:
-    3.0/3.1 use ``use_auth_token``, 4.x uses ``token``, and intermediate
-    builds may accept neither (in which case ``huggingface_hub`` falls
-    back to reading ``HF_TOKEN`` / ``HUGGING_FACE_HUB_TOKEN`` from the
-    environment, which our ``hf_token_kwargs`` helper already populates).
-
-    We introspect the signature once and pass only the kwarg the
-    installed version actually accepts.
+    ``wespeaker.load_model`` downloads the checkpoint into
+    ``~/.wespeaker/<model_id>`` on first call (via modelscope) and
+    returns a high-level ``Speaker`` wrapper. We only want the underlying
+    fbank-ingesting embedding network -- the wrapper's VAD / silero deps
+    are noise for in-loop distillation.
     """
-    import inspect
-    import os
+    import wespeaker  # type: ignore
 
-    from pyannote.audio import Model  # type: ignore
-
-    token = hf_token_kwargs().get("token")
-    if token is not None:
-        # Make sure huggingface_hub picks the token up via env even if we
-        # cannot pass it explicitly.
-        os.environ.setdefault("HF_TOKEN", token)
-
-    kwargs: dict[str, Any] = {}
-    if token is not None:
-        try:
-            params = inspect.signature(Model.from_pretrained).parameters
-        except (TypeError, ValueError):
-            params = {}
-        if "token" in params:
-            kwargs["token"] = token
-        elif "use_auth_token" in params:
-            kwargs["use_auth_token"] = token
-        # else: rely on env-var fallback inside huggingface_hub
-
-    return Model.from_pretrained(model_id, **kwargs).eval()
+    speaker = wespeaker.load_model(model_id)
+    return speaker.model.eval()
 
 
 class WespeakerResnet34Teacher(nn.Module):
-    """Per-chunk WeSpeaker ResNet34 embedding teacher."""
+    """Per-chunk WeSpeaker speaker-embedding teacher."""
 
     def __init__(
         self,
@@ -94,12 +101,26 @@ class WespeakerResnet34Teacher(nn.Module):
         self.target_dim = int(self.cfg.target_dim)
         self.target_layernorm = bool(self.cfg.target_layernorm)
         if model is None:
-            model = _load_pyannote_wespeaker(self.cfg.model_id)
+            model = _load_wespeaker_model(self.cfg.model_id)
         self.model = model
         self.model.eval()
         for p in self.model.parameters():
             p.requires_grad_(False)
         self.to(device)
+
+    def _fbank(self, waveform_1d_cpu: torch.Tensor) -> torch.Tensor:
+        import torchaudio.compliance.kaldi as kaldi  # type: ignore
+
+        feat = kaldi.fbank(
+            waveform_1d_cpu.unsqueeze(0),  # (1, T)
+            num_mel_bins=self.cfg.num_mel_bins,
+            frame_length=self.cfg.frame_length_ms,
+            frame_shift=self.cfg.frame_shift_ms,
+            sample_frequency=self.cfg.sample_rate,
+        )
+        if self.cfg.cmn:
+            feat = feat - feat.mean(dim=0, keepdim=True)
+        return feat
 
     @torch.no_grad()
     def forward(
@@ -115,11 +136,23 @@ class WespeakerResnet34Teacher(nn.Module):
         if chunk_mask is None:
             chunk_mask = torch.ones((b, n), dtype=torch.bool, device=audio.device)
 
-        # pyannote.audio.Model expects (B, 1, T) waveform input.
-        flat = audio.reshape(b * n, 1, t).to(torch.float32)
-        emb = self.model(flat)
-        if emb.dim() == 3:  # (B, 1, D) — squeeze the singleton speaker axis
-            emb = emb.squeeze(1)
+        # kaldi.fbank has no XLA implementation; pull audio to CPU once,
+        # rescale, compute fbank per chunk, restack. The model itself
+        # runs on whatever device its parameters live on (set by .to()).
+        flat = (audio.reshape(b * n, t).to(torch.float32) * float(self.cfg.waveform_scale)).cpu()
+        fbanks = [self._fbank(flat[i]) for i in range(flat.shape[0])]
+        feats = torch.stack(fbanks, dim=0)
+        try:
+            model_device = next(self.model.parameters()).device
+        except StopIteration:
+            model_device = audio.device
+        feats = feats.to(model_device, dtype=torch.float32)
+
+        emb = self.model(feats)
+        # Some wespeaker architectures return (last_layer_emb, embedding)
+        # tuples; keep the last (the speaker embedding).
+        if isinstance(emb, tuple):
+            emb = emb[-1]
         if emb.dim() != 2 or emb.shape[-1] != self.target_dim:
             raise ValueError(
                 f"wespeaker model returned shape {tuple(emb.shape)}; "
