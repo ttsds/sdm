@@ -28,6 +28,7 @@ from sdm.dotenv import hf_token, hf_token_kwargs
 @dataclass
 class EmiliaConfig:
     repo_id: str = "amphion/Emilia-Dataset"
+    config_name: str | None = None
     split: str = "train"
     streaming: bool = True
     shuffle_buffer: int = 10000
@@ -118,7 +119,10 @@ def _open_emilia_stream(cfg: EmiliaConfig) -> Iterable[dict[str, Any]]:
     from datasets import load_dataset  # type: ignore
 
     _disable_audio_encode_torchcodec()
-    ds = load_dataset(cfg.repo_id, split=cfg.split, streaming=cfg.streaming, **hf_token_kwargs())
+    load_args: list[Any] = [cfg.repo_id]
+    if cfg.config_name is not None:
+        load_args.append(cfg.config_name)
+    ds = load_dataset(*load_args, split=cfg.split, streaming=cfg.streaming, **hf_token_kwargs())
     ds = _cast_audio_to_plain_dict(ds)
     rank, world_size = _xla_worker_info()
     if world_size > 1 and hasattr(ds, "shard"):

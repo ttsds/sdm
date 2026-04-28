@@ -58,7 +58,14 @@ EXPERIMENT_TO_FINETUNE_CONFIG = {
 }
 
 
-def collect_held_out(repo_id: str, split: str, n_utt: int, *, seed: int = 42) -> list[dict]:
+def collect_held_out(
+    repo_id: str,
+    split: str,
+    n_utt: int,
+    *,
+    config_name: str | None = None,
+    seed: int = 42,
+) -> list[dict]:
     """Pull a fixed slice of the held-out dataset for probing.
 
     Reuses the streaming Emilia loader (which is generic over HF audio
@@ -68,6 +75,7 @@ def collect_held_out(repo_id: str, split: str, n_utt: int, *, seed: int = 42) ->
     """
     cfg = EmiliaConfig(
         repo_id=repo_id,
+        config_name=config_name,
         split=split,
         streaming=True,
         shuffle_buffer=0,        # deterministic order; we just want the first N
@@ -148,6 +156,8 @@ def main() -> None:
                     help="output dir of scripts/consolidate_weights.py")
     ap.add_argument("--dataset", default="mythicinfinity/libritts",
                     help="HF dataset repo id for the held-out probe split")
+    ap.add_argument("--dataset-config", default="dev",
+                    help="HF dataset config name (e.g. dev/clean/other/all for libritts)")
     ap.add_argument("--split", default="dev.clean",
                     help="dataset split (e.g. dev.clean / test.clean / train)")
     ap.add_argument("--probe-utterances", type=int, default=100)
@@ -171,8 +181,11 @@ def main() -> None:
     device = get_device()
     print(f"[probe] device={device}  experiments={experiments}")
 
-    print(f"[probe] loading {args.probe_utterances} utterances from {args.dataset}:{args.split}")
-    held_out = collect_held_out(args.dataset, args.split, args.probe_utterances)
+    print(f"[probe] loading {args.probe_utterances} utterances from "
+          f"{args.dataset}[{args.dataset_config}]:{args.split}")
+    held_out = collect_held_out(
+        args.dataset, args.split, args.probe_utterances, config_name=args.dataset_config
+    )
     print(f"[probe] held_out={len(held_out)} utterances "
           f"({sum(int(r['n_chunks']) for r in held_out)} valid chunks)")
 
