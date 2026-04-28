@@ -46,7 +46,8 @@ except ImportError as e:  # pragma: no cover
 
 
 EXPERIMENT_TO_FINETUNE_CONFIG = {
-    "sdm-xlsr": "configs/finetune_xlsr.yaml",
+    "sdm-xlsr": "configs/finetune_xlsr_fairseq.yaml",
+    "sdm-xlsr-fairseq": "configs/finetune_xlsr_fairseq.yaml",
     "sdm-dvector": "configs/finetune_dvector.yaml",
     "sdm-wespeaker": "configs/finetune_wespeaker.yaml",
     "sdm-pitch": "configs/finetune_pitch.yaml",
@@ -132,8 +133,22 @@ def teacher_targets(
 
 
 def fit_probe(x: np.ndarray, y: np.ndarray, *, alpha: float = 1.0) -> dict:
+    # Drop rows where either side contains non-finite values. Some teachers
+    # (e.g. pitch / speaking-rate) emit NaN for silent / undefined chunks and
+    # the backbone can produce NaN/Inf if the fp16 forward overflows; sklearn
+    # Ridge refuses to fit either.
+    finite = np.isfinite(x).all(axis=1) & np.isfinite(y).reshape(y.shape[0], -1).all(axis=1)
+    n_dropped = int((~finite).sum())
+    if n_dropped:
+        x = x[finite]
+        y = y[finite]
     if x.shape[0] < 4:
-        return {"r2_train": float("nan"), "r2_test": float("nan"), "n_test": int(x.shape[0])}
+        return {
+            "r2_train": float("nan"),
+            "r2_test": float("nan"),
+            "n_test": int(x.shape[0]),
+            "n_dropped": n_dropped,
+        }
     x_tr, x_te, y_tr, y_te = train_test_split(x, y, test_size=0.2, random_state=0)
     model = Ridge(alpha=alpha)
     model.fit(x_tr, y_tr)
@@ -141,6 +156,7 @@ def fit_probe(x: np.ndarray, y: np.ndarray, *, alpha: float = 1.0) -> dict:
         "r2_train": float(r2_score(y_tr, model.predict(x_tr), multioutput="uniform_average")),
         "r2_test": float(r2_score(y_te, model.predict(x_te), multioutput="uniform_average")),
         "n_test": int(len(x_te)),
+        "n_dropped": n_dropped,
     }
 
 
