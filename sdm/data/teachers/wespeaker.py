@@ -74,16 +74,26 @@ def _coerce_config(cfg: Any) -> WespeakerResnet34Config:
 def _load_wespeaker_model(model_id: str) -> nn.Module:
     """Load the bare embedding nn.Module from wespeaker-unofficial.
 
-    ``wespeaker.load_model`` downloads the checkpoint into
-    ``~/.wespeaker/<model_id>`` on first call (via modelscope) and
-    returns a high-level ``Speaker`` wrapper. We only want the underlying
-    fbank-ingesting embedding network -- the wrapper's VAD / silero deps
-    are noise for in-loop distillation.
+    We bypass ``wespeaker.load_model`` because it instantiates a
+    ``Speaker`` wrapper whose ``__init__`` eagerly loads silero-VAD,
+    which transitively requires ``onnxruntime``. We don't use VAD here
+    (chunk masks come from the dataloader), so we skip the wrapper and
+    load the checkpoint directly from the modelscope-downloaded
+    ``~/.wespeaker/<model_id>/{avg_model.pt, config.yaml}``.
     """
-    import wespeaker  # type: ignore
+    import os
 
-    speaker = wespeaker.load_model(model_id)
-    return speaker.model.eval()
+    import yaml  # type: ignore
+    from wespeaker.cli.hub import Hub  # type: ignore
+    from wespeaker.models.speaker_model import get_speaker_model  # type: ignore
+    from wespeaker.utils.checkpoint import load_checkpoint  # type: ignore
+
+    model_dir = Hub.get_model(model_id)
+    with open(os.path.join(model_dir, "config.yaml"), "r") as fin:
+        configs = yaml.load(fin, Loader=yaml.FullLoader)
+    model = get_speaker_model(configs["model"])(**configs["model_args"])
+    load_checkpoint(model, os.path.join(model_dir, "avg_model.pt"))
+    return model.eval()
 
 
 class WespeakerResnet34Teacher(nn.Module):
