@@ -19,13 +19,13 @@ GCS_DEST="gs://sdm-ckpts/probes/${RUN_ID}"
 EXPERIMENTS=(
     sdm-xlsr            # mHuBERT-147 generic
     sdm-dvector         # speaker
-    sdm-wespeaker       # speaker
     sdm-pitch           # prosody — F0
     sdm-mpm             # prosody — MPM L7
     sdm-speaking-rate   # prosody — syllables/sec
     sdm-w2v2-asr        # intelligibility — wav2vec2 ASR encoder
     sdm-mwhisper        # intelligibility — Whisper-small encoder
     sdm-emotion2vec     # emotion (outside paper, included downstream)
+    # sdm-wespeaker       # speaker
 )
 
 echo "[$EXPERIMENT] consolidating ${#EXPERIMENTS[@]} checkpoints into $CKPT_DIR"
