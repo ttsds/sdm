@@ -11,8 +11,12 @@ export CONFIG='configs/finetune_xlsr.yaml'   # used by _tpu_common.sh sanity che
 # shellcheck disable=SC1091
 source "$(dirname "$0")/_tpu_common.sh"
 
-# Install probe/analysis deps on top of what _tpu_common.sh synced.
-uv sync --extra probes --extra tracking --quiet
+# Install probe/analysis-only deps on top of what _tpu_common.sh synced.
+# Use `uv pip install` (additive) rather than `uv sync` (destructive) — the
+# bootstrap pinned torch / torchaudio / torch_xla via `uv pip install` and
+# they aren't in pyproject.toml, so `uv sync` would uninstall torchaudio
+# and break the dvector torchscript teacher (Wav2Mel needs MelSpectrogram).
+uv pip install --quiet scikit-learn matplotlib pandas wandb
 
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_DIR="runs/probes/${RUN_ID}"
