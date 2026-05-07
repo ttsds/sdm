@@ -268,12 +268,20 @@ def fit_probe(
         x = x[finite]
         y = y[finite]
         groups = groups[finite]
+    # Variance of y across all kept rows. R² is meaningless when the target
+    # is (near-)constant: sklearn returns 1.0 if the prediction matches the
+    # constant exactly, which can falsely advertise a perfect fit. Flag it.
+    y_arr = y.reshape(y.shape[0], -1) if y.ndim > 1 else y.reshape(-1, 1)
+    target_var = float(y_arr.var(axis=0).mean()) if y_arr.size else 0.0
+    target_constant = bool(target_var < 1e-12)
     base = {
         "probe_type": probe_type,
         "n_dropped": n_dropped,
         "n_dropped_x_only": n_dropped_x_only,
         "n_dropped_y_only": n_dropped_y_only,
         "n_dropped_both": n_dropped_both,
+        "target_var": target_var,
+        "target_constant": target_constant,
         "split": "group_by_utterance",
     }
     n_groups = int(np.unique(groups).size) if groups.size else 0
@@ -293,6 +301,17 @@ def fit_probe(
     model = _build_estimator(probe_type, alpha=alpha, mlp_hidden=mlp_hidden,
                              random_state=random_state)
     model.fit(x_tr, y_tr)
+    # If the target is constant, surface that explicitly with NaN R² rather
+    # than letting sklearn return a meaningless 1.0 / -inf.
+    if target_constant:
+        return {
+            "r2_train": float("nan"),
+            "r2_test": float("nan"),
+            "n_test": int(len(x_te)),
+            "n_groups_train": int(np.unique(groups[train_idx]).size),
+            "n_groups_test": int(np.unique(groups[test_idx]).size),
+            **base,
+        }
     return {
         "r2_train": float(r2_score(y_tr, model.predict(x_tr), multioutput="uniform_average")),
         "r2_test": float(r2_score(y_te, model.predict(x_te), multioutput="uniform_average")),
@@ -375,10 +394,29 @@ def main() -> None:
         t_run = time.perf_counter() - t0
         rep = _nonfinite_report(target_matrix[exp])
         teacher_health[exp] = rep
+        # Variance across kept (finite) rows: catches degenerate teachers
+        # such as g2p_speaking_rate when the dataset's transcript field name
+        # isn't recognised (every utterance gets text=None -> rate=0).
+        finite_mask = np.isfinite(target_matrix[exp]).all(
+            axis=tuple(range(1, target_matrix[exp].ndim))
+        ) if target_matrix[exp].ndim > 1 else np.isfinite(target_matrix[exp])
+        finite_y = target_matrix[exp][finite_mask]
+        if finite_y.size:
+            tgt_var = float(
+                finite_y.reshape(finite_y.shape[0], -1).var(axis=0).mean()
+            )
+        else:
+            tgt_var = 0.0
         print(
             f"[probe] teacher[{exp}] -> shape={target_matrix[exp].shape}  "
-            f"build={t_build:.1f}s  run={t_run:.1f}s  {_fmt_report(rep)}"
+            f"build={t_build:.1f}s  run={t_run:.1f}s  var={tgt_var:.3e}  "
+            f"{_fmt_report(rep)}"
         )
+        if tgt_var < 1e-12:
+            print(
+                f"        ^ WARNING: target variance is ~0; teacher emits a "
+                f"constant. Probe R² for this target column will be NaN."
+            )
         if rep["n_rows_bad"]:
             print(
                 f"        ^ {rep['n_rows_bad']} non-finite chunks in target; "

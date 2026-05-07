@@ -359,20 +359,32 @@ def _extract_language(record: dict[str, Any]) -> str | None:
     return None
 
 
+_TEXT_KEYS = (
+    "text",
+    "text_normalized",   # libritts (mythicinfinity/libritts)
+    "text_original",     # libritts fallback
+    "normalized_text",
+    "transcript",
+    "transcription",
+    "sentence",
+)
+
+
 def _extract_text(record: dict[str, Any]) -> str | None:
     """Pull the transcript string out of a record, if available.
 
     Emilia WebDataset shards stash the transcript under the ``json`` metadata
     sidecar (key ``text``). HF parquet builds expose it as a top-level
-    ``text`` column. Either form is accepted; missing/empty transcripts
-    return ``None`` so downstream teachers can decide how to handle them.
+    ``text`` column. LibriTTS uses ``text_normalized`` / ``text_original``.
+    Missing/empty transcripts return ``None`` so downstream teachers can
+    decide how to handle them.
     """
-    for key in ("text", "transcript", "transcription", "sentence"):
+    for key in _TEXT_KEYS:
         value = record.get(key)
         if isinstance(value, str) and value.strip():
             return value
     meta = _record_metadata(record)
-    for key in ("text", "transcript", "transcription", "sentence"):
+    for key in _TEXT_KEYS:
         value = meta.get(key)
         if isinstance(value, str) and value.strip():
             return value
