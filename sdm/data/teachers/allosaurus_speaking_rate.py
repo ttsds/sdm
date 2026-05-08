@@ -143,6 +143,7 @@ class _AllosaurusCounter:
         self._emit = float(emit)
         self._recognizer: Any = None
         self._import_error: Exception | None = None
+        self._import_traceback: str | None = None
         self._tmpdir: str | None = None
         self._fallback_warned = False
 
@@ -154,7 +155,10 @@ class _AllosaurusCounter:
 
             self._recognizer = read_recognizer(self._model_name)
         except Exception as exc:  # pragma: no cover - environment-dependent
+            import traceback
+
             self._import_error = exc
+            self._import_traceback = traceback.format_exc()
 
     def _temp_path(self) -> str:
         if self._tmpdir is None:
@@ -180,7 +184,8 @@ class _AllosaurusCounter:
                     "allosaurus is unavailable "
                     f"({self._import_error!r}); per-chunk speaking-rate "
                     "targets will be all-zero. Install the `teachers` extra "
-                    "to enable accurate audio-based counts.",
+                    "to enable accurate audio-based counts.\n"
+                    f"Traceback:\n{self._import_traceback or '(none)'}",
                     RuntimeWarning,
                     stacklevel=2,
                 )
@@ -255,6 +260,13 @@ class AllosaurusSpeakingRateTeacher(nn.Module):
             counter = _AllosaurusCounter(
                 model_name=self.cfg.allosaurus_model, emit=self.cfg.emit
             )
+            # Eagerly load the recognizer in the main process so the model
+            # files / network downloads are resolved once, before any
+            # dataloader workers fork. Otherwise each worker would try to
+            # initialise allosaurus concurrently and may race on the
+            # bundled pretrained dir (FileNotFoundError under load).
+            if isinstance(counter, _AllosaurusCounter):
+                counter._ensure()
         self._counter: ChunkVowelCounter = counter
         self._device = torch.device(device) if not isinstance(device, torch.device) else device
 
