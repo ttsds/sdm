@@ -257,6 +257,12 @@ class WristbandGaussianLoss:
         d = int(xw.shape[-1])
         n_f, d_f = float(n), float(d)
         eps = self.eps
+        # Floor for variance in log/reciprocal terms. Large encoders (e.g.
+        # fairseq XLS-R, hidden=1024) can have near-dead output dims at init
+        # whose sample variance underflows; the gradient of log(var) is
+        # 1/var which then explodes and corrupts bf16 encoder backward.
+        # Clamping at 1e-4 bounds the gradient magnitude at ~1e4 (bf16 safe).
+        var_floor = 1.0e-4
 
         if self.moment == "w2":
             return W2ToStandardNormalSq(xw, reduction="none") / d_f
@@ -268,14 +274,15 @@ class WristbandGaussianLoss:
         xc = xw - mu[..., None, :]
         if self.moment == "jeff_diag":
             var = xc.square().sum(dim=-2) / (n_f - 1.0)
-            v = var + eps
+            v = var.clamp_min(var_floor)
             inv_v = v.reciprocal()
             mu2 = mu.square()
             return 0.25 * (v + inv_v + mu2 + mu2 * inv_v - 2.0).mean(dim=-1)
 
         if self.moment == "kl_diag":
             var = xc.square().sum(dim=-2) / (n_f - 1.0)
-            return 0.5 * (var + mu.square() - 1.0 - torch.log(var + eps)).mean(dim=-1)
+            v = var.clamp_min(var_floor)
+            return 0.5 * (v + mu.square() - 1.0 - torch.log(v)).mean(dim=-1)
 
         eps_cov = (
             max(eps, 1.0e-6)
