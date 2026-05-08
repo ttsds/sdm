@@ -33,3 +33,4 @@ teacher_cache/
 .local-libs/
 .claude/
 .tmp/
+.tpu-logs/

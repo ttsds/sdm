@@ -38,7 +38,7 @@ ROWS=(
     "sdm-w2v2-asr-wristband|configs/finetune_w2v2_asr_wristband.yaml|v6e-8|$V6E_ZONE|$V6E_RUNTIME"
     "sdm-emotion2vec-wristband|configs/finetune_emotion2vec_wristband.yaml|v6e-8|$V6E_ZONE|$V6E_RUNTIME"
     "sdm-speaking-rate-wristband|configs/finetune_speaking_rate_wristband.yaml|v6e-8|$V6E_ZONE|$V6E_RUNTIME"
-    "sdm-xlsr-wristband|configs/finetune_xlsr_wristband.yaml|v5e-8|$V5E_ZONE|$V5E_RUNTIME"
+    "sdm-xlsr-wristband|configs/finetune_xlsr_wristband.yaml|v5litepod-8|$V5E_ZONE|$V5E_RUNTIME"
 )
 
 row_for() {
@@ -53,29 +53,49 @@ row_for() {
 create_one() {
     local row="$1"
     IFS='|' read -r name cfg accel zone runtime <<<"$row"
-    echo "[create] $name ($accel in $zone)"
-    # --best-effort = spot for queued-resources. Returns immediately while
-    # the request waits for capacity server-side.
-    gcloud compute tpus queued-resources create "$name" \
-        --node-id="$name" \
-        --project="$PROJECT" \
-        --zone="$zone" \
-        --accelerator-type="$accel" \
-        --runtime-version="$runtime" \
-        --best-effort \
-        --async || echo "[create] $name: request failed (already exists?)"
+    # Skip if VM already exists.
+    if gcloud compute tpus tpu-vm describe "$name" --project="$PROJECT" --zone="$zone" \
+            --format="value(name)" >/dev/null 2>&1; then
+        echo "[create] $name: already exists, skipping"
+        return 0
+    fi
+    mkdir -p .tpu-logs
+    local log=".tpu-logs/${name}.create.log"
+    local err=".tpu-logs/${name}.create.err"
+    # Retry-until-stockout-clears loop. Each `tpu-vm create --spot` call blocks
+    # ~15 min before failing on RESOURCE_EXHAUSTED; we just keep retrying. The
+    # caller backgrounds this so all VMs poll in parallel.
+    local RETRY_RE='no more capacity|Insufficient capacity|RESOURCE_EXHAUSTED|UNAVAILABLE|resourceExhausted|Stockout|currently unavailable|"code": 8|"code": 10|HttpError|503|504|deadline exceeded|Internal error'
+    local attempt=0
+    while true; do
+        attempt=$((attempt + 1))
+        echo "[$(date -Iseconds)] [$name] attempt $attempt" | tee -a "$log"
+        if gcloud compute tpus tpu-vm create "$name" \
+                --project="$PROJECT" \
+                --zone="$zone" \
+                --accelerator-type="$accel" \
+                --version="$runtime" \
+                --spot >>"$log" 2>"$err"; then
+            echo "[$(date -Iseconds)] [$name] CREATED after $attempt attempts" | tee -a "$log"
+            return 0
+        fi
+        tail -3 "$err" | tee -a "$log" >/dev/null
+        if grep -aqE "$RETRY_RE" "$err" 2>/dev/null; then
+            echo "[$name] retryable error, sleeping 60s" >> "$log"
+        else
+            echo "[$name] unknown error (retrying anyway):" >> "$log"
+            cat "$err" >> "$log"
+        fi
+        sleep 60
+    done
 }
 
 delete_one() {
     local row="$1"
     IFS='|' read -r name _ _ zone _ <<<"$row"
     echo "[delete] $name (zone=$zone)"
-    # Force-delete the underlying VM first if it's running, then drop the
-    # queued resource record.
     gcloud compute tpus tpu-vm delete "$name" \
         --project="$PROJECT" --zone="$zone" --quiet 2>/dev/null || true
-    gcloud compute tpus queued-resources delete "$name" \
-        --project="$PROJECT" --zone="$zone" --force --quiet 2>/dev/null || true
 }
 
 status_all() {
@@ -86,10 +106,10 @@ status_all() {
     done
     for z in "${!ZONES[@]}"; do
         echo "=== $z ==="
-        gcloud compute tpus queued-resources list \
+        gcloud compute tpus tpu-vm list \
             --project="$PROJECT" --zone="$z" \
             --filter="name~-wristband$" \
-            --format="table(name,state.state,acceleratorType)" 2>/dev/null
+            --format="table(name,state,acceleratorType)" 2>/dev/null
     done
 }
 
@@ -98,46 +118,129 @@ launch_one() {
     IFS='|' read -r name cfg _ zone _ <<<"$row"
     local ssh="gcloud compute tpus tpu-vm ssh $name --project=$PROJECT --zone=$zone --worker=all"
     local scp="gcloud compute tpus tpu-vm scp --project=$PROJECT --zone=$zone --worker=all"
+    mkdir -p .tpu-logs
+    local log=".tpu-logs/${name}.launch.log"
 
-    echo "[launch] $name -> $cfg"
-    # Wait for VM to exist (queued-resource ACTIVE).
-    for i in $(seq 1 60); do
-        if gcloud compute tpus tpu-vm describe "$name" \
+    echo "[launch] $name -> $cfg" | tee -a "$log"
+    # Wait up to 12h for VM to be READY (covers spot-stockout retry loops).
+    for i in $(seq 1 1440); do
+        local state
+        state=$(gcloud compute tpus tpu-vm describe "$name" \
                 --project="$PROJECT" --zone="$zone" \
-                --format="value(state)" 2>/dev/null | grep -q READY; then
-            break
+                --format="value(state)" 2>/dev/null)
+        if [[ "$state" == "READY" ]]; then break; fi
+        if (( i % 10 == 0 )); then
+            echo "[launch] $name state=$state (attempt $i); sleeping 30s" >> "$log"
         fi
-        echo "[launch] $name not READY yet (attempt $i); sleeping 30s"
         sleep 30
     done
 
-    # 1. Make sure ~/sdm exists (clone if needed) and has the latest tip.
-    $ssh --command "test -d ~/sdm/.git || git clone https://github.com/ttsds/sdm.git ~/sdm; cd ~/sdm && git fetch --quiet origin && git reset --hard origin/main"
+    # Clone or fast-forward sdm to origin/main.
+    $ssh --command "test -d ~/sdm/.git || git clone https://github.com/ttsds/sdm.git ~/sdm; cd ~/sdm && git fetch --quiet origin && git reset --hard origin/main" >> "$log" 2>&1
 
-    # 2. Upload .env (contains WANDB_API_KEY, HF_TOKEN, SDM_GCP_PROJECT).
-    $scp .env "$name:~/sdm/.env"
+    # Upload .env (WANDB_API_KEY, HF_TOKEN, SDM_GCP_PROJECT).
+    $scp .env "$name:~/sdm/.env" >> "$log" 2>&1
 
-    # 3. Start training in a detached tmux session so SSH disconnect doesn't
-    #    kill it. Logs land in ~/sdm/train.log; tail with:
-    #      $ssh --command "tail -f ~/sdm/train.log"
-    $ssh --command "cd ~/sdm && tmux kill-session -t sdm 2>/dev/null; tmux new -d -s sdm \"CONFIG=$cfg ./scripts/run_finetune.sh > train.log 2>&1\""
-    echo "[launch] $name: started"
+    # Start training in detached tmux. Tail with:
+    #   gcloud compute tpus tpu-vm ssh <name> --zone=... --command "tail -f ~/sdm/train.log"
+    $ssh --command "sudo apt-get install -y tmux >/dev/null 2>&1 || true; cd ~/sdm && tmux kill-session -t sdm 2>/dev/null; tmux new -d -s sdm \"CONFIG=$cfg ./scripts/run_finetune.sh > train.log 2>&1\"" >> "$log" 2>&1
+    echo "[launch] $name: started" | tee -a "$log"
+}
+
+# Detached: poll-create-then-launch for one row. This is what
+# --create-and-launch-detached spawns per VM.
+create_and_launch_one() {
+    local row="$1"
+    create_one "$row" || return $?
+    launch_one "$row"
 }
 
 case "${1:-}" in
     --create)
+        # Foreground (parallel, blocks): all 9 retry until success.
         for r in "${ROWS[@]}"; do create_one "$r" & done; wait
         echo
-        echo "All 9 requests queued. Watch with: $0 --status"
+        echo "All 9 created. Run: $0 --launch"
+        ;;
+    --create-detached)
+        # Background detached: each retry loop runs as nohup, logs to
+        # .tpu-logs/<name>.create.log. Survives shell exit. Check progress
+        # with: $0 --status   or   tail -f .tpu-logs/*.create.log
+        mkdir -p .tpu-logs
+        for r in "${ROWS[@]}"; do
+            IFS='|' read -r name _ _ _ _ <<<"$r"
+            pidfile=".tpu-logs/${name}.create.pid"
+            if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+                echo "[detach] $name: already polling (pid $(cat "$pidfile"))"
+                continue
+            fi
+            nohup bash -c "
+                $(declare -f create_one)
+                PROJECT='$PROJECT'
+                create_one '$r'
+            " >/dev/null 2>&1 &
+            echo $! > "$pidfile"
+            echo "[detach] $name: pid $(cat "$pidfile") (log .tpu-logs/${name}.create.log)"
+        done
+        echo
+        echo "All retry loops detached. Check with:"
+        echo "  $0 --status"
+        echo "  ls .tpu-logs/ ; tail -f .tpu-logs/<name>.create.log"
+        ;;
+    --all-detached)
+        # Background detached: each VM runs poll-create-then-launch in one
+        # nohup process. As soon as a VM goes READY, training starts. Check
+        # with: $0 --status   or   tail -f .tpu-logs/<name>.{create,launch}.log
+        mkdir -p .tpu-logs
+        for r in "${ROWS[@]}"; do
+            IFS='|' read -r name _ _ _ _ <<<"$r"
+            pidfile=".tpu-logs/${name}.create.pid"
+            if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+                echo "[detach] $name: already polling (pid $(cat "$pidfile"))"
+                continue
+            fi
+            nohup bash -c "
+                $(declare -f create_one)
+                $(declare -f launch_one)
+                $(declare -f create_and_launch_one)
+                PROJECT='$PROJECT'
+                create_and_launch_one '$r'
+            " >/dev/null 2>&1 &
+            echo $! > "$pidfile"
+            echo "[detach] $name: pid $(cat "$pidfile") (logs .tpu-logs/${name}.{create,launch}.log)"
+        done
+        echo
+        echo "All create+launch loops detached. Check with:"
+        echo "  $0 --status"
+        echo "  tail -f .tpu-logs/*.launch.log"
         ;;
     --status)
         status_all
+        echo
+        echo "Active retry-loop pids:"
+        for f in .tpu-logs/*.create.pid; do
+            [[ -f "$f" ]] || continue
+            pid=$(cat "$f")
+            name=$(basename "$f" .create.pid)
+            if kill -0 "$pid" 2>/dev/null; then
+                echo "  $name: pid $pid (running)"
+            else
+                echo "  $name: pid $pid (exited)"
+            fi
+        done
         ;;
     --launch)
         for r in "${ROWS[@]}"; do launch_one "$r" & done; wait
         ;;
     --delete)
         for r in "${ROWS[@]}"; do delete_one "$r" & done; wait
+        # Also kill any retry loops still running.
+        shopt -s nullglob
+        for f in .tpu-logs/*.create.pid; do
+            kill "$(cat "$f")" 2>/dev/null || true
+            rm -f "$f"
+        done
+        shopt -u nullglob
         ;;
     sdm-*-wristband)
         # Single-VM mode: act on just this one. Defaults to --launch.
