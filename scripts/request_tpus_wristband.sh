@@ -24,9 +24,9 @@ fi
 
 PROJECT="${SDM_GCP_PROJECT:?set SDM_GCP_PROJECT in .env}"
 V6E_ZONE="${SDM_TPU_ZONE_V6E:-europe-west4-a}"
-V5E_ZONE="${SDM_TPU_ZONE_V5E:-us-central1-a}"
+V4_ZONE="${SDM_TPU_ZONE_V4:-us-central2-b}"
 V6E_RUNTIME="v2-alpha-tpuv6e"
-V5E_RUNTIME="v2-alpha-tpuv5-lite"
+V4_RUNTIME="tpu-ubuntu2204-base"
 
 # (vm_name, config, accel, zone, runtime)
 ROWS=(
@@ -38,7 +38,7 @@ ROWS=(
     "sdm-w2v2-asr-wristband|configs/finetune_w2v2_asr_wristband.yaml|v6e-8|$V6E_ZONE|$V6E_RUNTIME"
     "sdm-emotion2vec-wristband|configs/finetune_emotion2vec_wristband.yaml|v6e-8|$V6E_ZONE|$V6E_RUNTIME"
     "sdm-speaking-rate-wristband|configs/finetune_speaking_rate_wristband.yaml|v6e-8|$V6E_ZONE|$V6E_RUNTIME"
-    "sdm-xlsr-wristband|configs/finetune_xlsr_wristband.yaml|v5litepod-8|$V5E_ZONE|$V5E_RUNTIME"
+    "sdm-xlsr-wristband|configs/finetune_xlsr_wristband.yaml|v4-8|$V4_ZONE|$V4_RUNTIME"
 )
 
 row_for() {
@@ -140,10 +140,13 @@ launch_one() {
     # Upload .env (WANDB_API_KEY, HF_TOKEN, SDM_GCP_PROJECT).
     $scp .env "$name:~/sdm/.env" >> "$log" 2>&1
 
-    # Start training in detached tmux. Tail with:
-    #   gcloud compute tpus tpu-vm ssh <name> --zone=... --command "tail -f ~/sdm/train.log"
-    $ssh --command "sudo apt-get install -y tmux >/dev/null 2>&1 || true; cd ~/sdm && tmux kill-session -t sdm 2>/dev/null; tmux new -d -s sdm \"CONFIG=$cfg ./scripts/run_finetune.sh > train.log 2>&1\"" >> "$log" 2>&1
-    echo "[launch] $name: started" | tee -a "$log"
+    # Idempotent launch: only start training if no `sdm` tmux session
+    # exists. Otherwise leave the running one alone — re-running this
+    # function on a VM that's already training would otherwise kill its
+    # tmux and restart from the latest checkpoint (or step 0 if none),
+    # wasting compute.
+    $ssh --command "sudo apt-get install -y tmux >/dev/null 2>&1 || true; if tmux has-session -t sdm 2>/dev/null; then echo '[launch] tmux sdm already running, skipping'; else cd ~/sdm && tmux new -d -s sdm \"CONFIG=$cfg ./scripts/run_finetune.sh > train.log 2>&1\" && echo '[launch] tmux sdm started'; fi" >> "$log" 2>&1
+    echo "[launch] $name: done" | tee -a "$log"
 }
 
 # Detached: poll-create-then-launch for one row. This is what
