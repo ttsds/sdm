@@ -30,3 +30,6 @@ teacher_cache/
 *.swp
 .DS_Store
 .tpu/logs/
+.local-libs/
+.claude/
+.tmp/

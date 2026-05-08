@@ -6,8 +6,7 @@
 # G2P teacher (which broadcast a single utterance-level rate across all
 # chunks) so the student must learn local prosody, not a constant.
 
-experiment: sdm-speaking-rate
-
+experiment: sdm-speaking-rate-wristband
 backbone:
   kind: fairseq_w2v2
   model_id: facebook/wav2vec2-xls-r-300m
@@ -53,12 +52,23 @@ train:
   total_steps: 10000
   log_every: 50
   ckpt_every: 2000
-  ckpt_dir: gs://sdm-ckpts/sdm-speaking-rate
+  ckpt_dir: gs://sdm-ckpts/sdm-speaking-rate-wristband
   resume_from_latest: true
+  eval_every: 5000
+  eval_utterances: 64
   fsdp: false
   seed: 0
   wandb:
     enabled: true
     project: sdm
-    run_name: sdm-speaking-rate-10pct
-    tags: [finetune, multilingual, 10pct, v6e-8, prosody]
+    run_name: sdm-speaking-rate-wristband-10pct
+    tags: [finetune, multilingual, 10pct, v6e-8, prosody, wristband]
+
+regularizer:
+  enabled: true
+  weight: 0.1
+  beta: 8.0
+  lambda_rad: 0.1
+  lambda_mom: 1.0
+  moment: w2
+  calibrate: false

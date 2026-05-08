@@ -1,0 +1,33 @@
+[
+  {
+    "experiment": "sdm-xlsr-fairseq",
+    "teacher_kind": "hf_ssl",
+    "loss_kind": "cos_l1",
+    "target_dim": 768,
+    "trained_layer": -1,
+    "load_s": 11.27,
+    "eval_s": 79.24,
+    "n_eval": 87,
+    "n_dropped": 0,
+    "target_var": 0.2717144787311554,
+    "target_constant": false,
+    "loss": 0.19770225882530212,
+    "r2": 0.21301697194576263,
+    "mean_abs_err": 0.3058345913887024,
+    "cosine_mean": 0.9104301333427429,
+    "pred_report": {
+      "n_nan": 0,
+      "n_posinf": 0,
+      "n_neginf": 0,
+      "n_rows_bad": 0,
+      "n_rows_total": 87
+    },
+    "target_report": {
+      "n_nan": 0,
+      "n_posinf": 0,
+      "n_neginf": 0,
+      "n_rows_bad": 0,
+      "n_rows_total": 87
+    }
+  }
+]

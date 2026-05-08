@@ -1,0 +1,59 @@
+# sdm-xlsr: distill XLS-R 300M (student) against mHuBERT-147 layer 8 (teacher).
+# In-the-loop teacher (HF AutoModel on TPU, frozen, bf16, no grad).
+
+experiment: sdm-xlsr-wristband
+backbone:
+  model_id: facebook/wav2vec2-xls-r-300m
+  hidden_size: 1024
+  layer_idx: -1                  # backbone layer fed to head and used for probes
+
+teacher:
+  kind: hf_ssl                   # "hf_ssl" -> AutoModel + processor + layer index
+  model_id: utter-project/mHuBERT-147
+  layer: 8
+  in_loop: true                  # run teacher on TPU each step
+  cache_dir: null
+  target_dim: 768                # mHuBERT-147 hidden size
+  pooled: chunked                # mean-pool teacher frames within each 1s chunk
+  target_layernorm: true         # parameter-free LN over feature axis (HuBERT/data2vec-style)
+
+data:
+  repo_id: amphion/Emilia-Dataset
+  split: train
+  streaming: true
+  shuffle_buffer: 10000
+  seed: 0
+  fraction: 0.1                  # 10% of records, then stop
+  sample_rate: 16000
+  chunk_seconds: 1.0
+  max_chunks: 32                 # 32s of audio max -- truncate longer
+
+train:
+  batch_size: 4                  # per-chip
+  grad_accum: 4
+  lr: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 1000
+  total_steps: 10000             # convergence is mostly finished by ~10k
+  log_every: 50
+  ckpt_every: 2000
+  ckpt_dir: gs://sdm-ckpts/sdm-xlsr-wristband
+  resume_from_latest: true
+  eval_every: 5000
+  eval_utterances: 64
+  fsdp: false
+  seed: 0
+  wandb:
+    enabled: true
+    project: sdm
+    run_name: sdm-xlsr-wristband-10pct
+    tags: [finetune, multilingual, 10pct, v6e-8, xlsr-generic, wristband]
+
+regularizer:
+  enabled: true
+  weight: 0.1
+  beta: 8.0
+  lambda_rad: 0.1
+  lambda_mom: 1.0
+  moment: w2
+  calibrate: false

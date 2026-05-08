@@ -1,0 +1,42 @@
+{
+  "sdm-xlsr-fairseq": {
+    "ckpt": "checkpoints/consolidated/sdm-xlsr-fairseq/final.pt",
+    "backbone": "checkpoints/consolidated/sdm-xlsr-fairseq/backbone.pt",
+    "n_backbone_params": 316224768
+  },
+  "sdm-dvector": {
+    "ckpt": "checkpoints/consolidated/sdm-dvector/final.pt",
+    "backbone": "checkpoints/consolidated/sdm-dvector/backbone.pt",
+    "n_backbone_params": 315699968
+  },
+  "sdm-pitch": {
+    "ckpt": "checkpoints/consolidated/sdm-pitch/final.pt",
+    "backbone": "checkpoints/consolidated/sdm-pitch/backbone.pt",
+    "n_backbone_params": 315438593
+  },
+  "sdm-mpm": {
+    "ckpt": "checkpoints/consolidated/sdm-mpm/final.pt",
+    "backbone": "checkpoints/consolidated/sdm-mpm/backbone.pt",
+    "n_backbone_params": 315699968
+  },
+  "sdm-speaking-rate": {
+    "ckpt": "checkpoints/consolidated/sdm-speaking-rate/final.pt",
+    "backbone": "checkpoints/consolidated/sdm-speaking-rate/backbone.pt",
+    "n_backbone_params": 315438593
+  },
+  "sdm-w2v2-asr": {
+    "ckpt": "checkpoints/consolidated/sdm-w2v2-asr/final.pt",
+    "backbone": "checkpoints/consolidated/sdm-w2v2-asr/backbone.pt",
+    "n_backbone_params": 316487168
+  },
+  "sdm-mwhisper": {
+    "ckpt": "checkpoints/consolidated/sdm-mwhisper/final.pt",
+    "backbone": "checkpoints/consolidated/sdm-mwhisper/backbone.pt",
+    "n_backbone_params": 316224768
+  },
+  "sdm-emotion2vec": {
+    "ckpt": "checkpoints/consolidated/sdm-emotion2vec/final.pt",
+    "backbone": "checkpoints/consolidated/sdm-emotion2vec/backbone.pt",
+    "n_backbone_params": 316224768
+  }
+}

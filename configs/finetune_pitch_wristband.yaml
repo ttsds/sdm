@@ -1,0 +1,68 @@
+# sdm-pitch: distill WORLD F0 (mean per chunk) into XLS-R 300M -- 1-D scalar target.
+# Pitch is computed on the TPU host CPU inside dataloader workers (pyworld).
+# TODO: implement sdm/data/teachers/pyworld_f0.py and register the
+# `pyworld_f0` kind in sdm/data/teachers/__init__.py.
+
+experiment: sdm-pitch-wristband
+backbone:
+  kind: fairseq_w2v2
+  model_id: facebook/wav2vec2-xls-r-300m
+  hidden_size: 1024
+  layer_idx: -1
+
+teacher:
+  kind: pyworld_f0
+  in_loop: true                  # extracted by num_workers CPU procs alongside audio
+  cache_dir: null
+  target_dim: 1
+  pooled: chunked                # one scalar per chunk
+  target_layernorm: false
+  loss: l1                       # scalar target: cosine is degenerate, use plain L1
+  # Linear normalisation so L1 starts at ~O(1) instead of ~150 Hz.
+  # Voiced F0 mean ~150 Hz, range ~70-800; this maps to roughly [-1, 7].
+  target_mean: 150.0
+  target_scale: 100.0
+  chunk_seconds: 1.0
+  sample_rate: 16000
+
+data:
+  repo_id: amphion/Emilia-Dataset
+  split: train
+  streaming: true
+  shuffle_buffer: 10000
+  seed: 0
+  fraction: 0.1
+  sample_rate: 16000
+  chunk_seconds: 1.0
+  max_chunks: 32
+  num_workers: 8                 # CPU procs that compute F0 keep up with TPU
+
+train:
+  batch_size: 4                  # tiny target -> larger batch fits comfortably
+  grad_accum: 4
+  lr: 5.0e-5
+  weight_decay: 0.01
+  warmup_steps: 1000
+  total_steps: 10000             # the regression converges fast
+  log_every: 50
+  ckpt_every: 2000
+  ckpt_dir: gs://sdm-ckpts/sdm-pitch-wristband
+  resume_from_latest: true
+  eval_every: 5000
+  eval_utterances: 64
+  fsdp: false
+  seed: 0
+  wandb:
+    enabled: true
+    project: sdm
+    run_name: sdm-pitch-wristband-10pct
+    tags: [finetune, multilingual, 10pct, v6e-8, prosody, wristband]
+
+regularizer:
+  enabled: true
+  weight: 0.1
+  beta: 8.0
+  lambda_rad: 0.1
+  lambda_mom: 1.0
+  moment: w2
+  calibrate: false

@@ -52,6 +52,12 @@ def build_teacher(cfg: Any, *, device: torch.device | str = "cpu") -> Teacher:
         from sdm.data.teachers.g2p_speaking_rate import G2pSpeakingRateTeacher
 
         return G2pSpeakingRateTeacher(cfg, device=device)
+    if kind == "allosaurus_speaking_rate":
+        from sdm.data.teachers.allosaurus_speaking_rate import (
+            AllosaurusSpeakingRateTeacher,
+        )
+
+        return AllosaurusSpeakingRateTeacher(cfg, device=device)
     if kind == "dvector_torchscript":
         from sdm.data.teachers.dvector_torchscript import DvectorTorchscriptTeacher
 

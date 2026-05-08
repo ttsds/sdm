@@ -32,10 +32,12 @@ from pathlib import Path
 import numpy as np
 import torch
 import yaml
+from joblib import Parallel, delayed
 from sklearn.linear_model import Ridge
 from sklearn.metrics import r2_score
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.neural_network import MLPRegressor
+from threadpoolctl import threadpool_limits
 from tqdm.auto import tqdm
 
 try:
@@ -328,6 +330,17 @@ def _backbone_model_id(experiment: str) -> str:
     return cfg["backbone"]["model_id"]
 
 
+def _fit_probe_pinned(*args, **kwargs) -> dict:
+    """Run ``fit_probe`` with BLAS limited to 1 thread.
+
+    Used by joblib workers so we get compute parallelism across the 16
+    (target, probe_type) tasks per layer rather than each worker
+    spawning N BLAS threads and thrashing.
+    """
+    with threadpool_limits(limits=1):
+        return fit_probe(*args, **kwargs)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--consolidated", type=Path, required=True,
@@ -354,6 +367,10 @@ def main() -> None:
                          "(100 utterances is small and TPU XLA compile dominates)."
                          " Pass 'auto' to use sdm.train.xla_utils.get_device().")
     ap.add_argument("--wandb", action="store_true")
+    ap.add_argument("--n-jobs", type=int, default=1,
+                    help="parallel sklearn probe fits per layer (joblib loky); "
+                         "each worker is pinned to 1 BLAS thread to avoid "
+                         "oversubscription. Default 1 (sequential).")
     args = ap.parse_args()
 
     if not _SDM_READY:
@@ -474,22 +491,49 @@ def main() -> None:
                     f"{_fmt_report(x_rep)}"
                 )
             t_layer_probes = time.perf_counter()
+            tasks = []  # list[(tgt_exp, probe_type)]
             for tgt_exp, y in target_matrix.items():
                 if x.shape[0] != y.shape[0]:
                     raise RuntimeError(
                         f"chunk count mismatch: {sdm_exp}@L{layer} x={x.shape} vs {tgt_exp} y={y.shape}"
                     )
                 for probe_type in args.probe_types:
-                    probe = fit_probe(x, y, groups, probe_type=probe_type,
-                                      mlp_hidden=args.mlp_hidden)
-                    results.append({
-                        "sdm": sdm_exp,
-                        "layer": int(layer),
-                        "target": tgt_exp,
-                        **probe,
-                    })
-                latest = {r["probe_type"]: r["r2_test"] for r in results[-len(args.probe_types):]}
-                scores = "  ".join(f"{pt}={latest[pt]:+.3f}" for pt in args.probe_types)
+                    tasks.append((tgt_exp, probe_type))
+
+            if args.n_jobs == 1:
+                probes = [
+                    fit_probe(x, target_matrix[tgt], groups,
+                              probe_type=pt, mlp_hidden=args.mlp_hidden)
+                    for tgt, pt in tasks
+                ]
+            else:
+                # joblib loky backend memmaps large numpy arrays so x and y
+                # are not re-pickled into every worker. Pin BLAS to 1 thread
+                # per worker (we want compute parallelism across the 16
+                # tasks, not within each MLPRegressor's matmul).
+                probes = Parallel(
+                    n_jobs=args.n_jobs, backend="loky", prefer="processes",
+                )(
+                    delayed(_fit_probe_pinned)(
+                        x, target_matrix[tgt], groups,
+                        probe_type=pt, mlp_hidden=args.mlp_hidden,
+                    )
+                    for tgt, pt in tasks
+                )
+
+            for (tgt_exp, _pt), probe in zip(tasks, probes):
+                results.append({
+                    "sdm": sdm_exp,
+                    "layer": int(layer),
+                    "target": tgt_exp,
+                    **probe,
+                })
+            # Print one row per (sdm,layer,target) — combine probe types.
+            for tgt_exp in target_matrix:
+                tgt_probes = [r for r in results[-len(tasks):] if r["target"] == tgt_exp]
+                scores = "  ".join(
+                    f"{r['probe_type']}={r['r2_test']:+.3f}" for r in tgt_probes
+                )
                 print(f"{sdm_exp:>20s} L{layer:>2}  ->  {tgt_exp:<20s}  {scores}")
             print(
                 f"[time] {sdm_exp} L{layer} probes ({len(target_matrix)} targets): "

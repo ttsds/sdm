@@ -1,0 +1,9 @@
+,sdm-xlsr-fairseq,sdm-dvector,sdm-mpm,sdm-pitch,sdm-speaking-rate,sdm-mwhisper,sdm-w2v2-asr,sdm-emotion2vec
+sdm-xlsr-fairseq,12,2,2,2,24,15,16,14
+sdm-dvector,17,2,2,2,24,16,16,16
+sdm-mpm,12,2,2,2,24,16,16,15
+sdm-pitch,11,2,1,1,24,13,15,16
+sdm-speaking-rate,12,2,2,1,24,13,16,12
+sdm-mwhisper,11,2,2,2,24,11,17,16
+sdm-w2v2-asr,12,2,1,2,24,12,16,16
+sdm-emotion2vec,12,2,3,3,2,13,16,16

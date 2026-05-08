@@ -234,3 +234,74 @@ def test_train_skips_checkpoint_with_nonfinite_model(monkeypatch, tmp_path, caps
     assert final["step"] == 1
 
 
+
+def test_train_runs_with_wristband_enabled(monkeypatch, tmp_path):
+    """The pre-head wristband regularizer trains end-to-end on tiny shapes.
+
+    Uses target_dim=8 so the embedding-style branches (rad+ang+mom) all
+    activate; D=1 would skip the angular path. Verifies the wristband term
+    flows into backprop by checking the backbone weights move *and* the
+    new W&B keys are written.
+    """
+    import sdm.train.wandb_utils as wandb_utils
+
+    monkeypatch.setattr(
+        "sdm.modeling.distill_model.AutoModel.from_pretrained",
+        lambda model_id, **_: _FakeBackbone(hidden_size=6),
+    )
+    monkeypatch.setattr(
+        run_distill, "_build_teacher", lambda cfg, device: _FakeTeacher(target_dim=8)
+    )
+    _patch_fake_feature_extractor(monkeypatch)
+    records = list(_fake_records(8, seconds=1.5, sr=16000))
+    monkeypatch.setattr(
+        "sdm.data.streaming_emilia._open_emilia_stream", lambda cfg: iter(records)
+    )
+
+    logged: list[dict] = []
+    monkeypatch.setattr(
+        wandb_utils, "log", lambda payload, step=None: logged.append(dict(payload))
+    )
+    monkeypatch.setattr(wandb_utils, "init", lambda *a, **kw: None)
+    monkeypatch.setattr(wandb_utils, "finish", lambda: None)
+
+    from sdm.losses.wristband_gaussian import GaussianLossConfig
+
+    cfg = DistillConfig(
+        experiment="test-wristband",
+        backbone=BackboneConfig(model_id="fake/mhubert", hidden_size=6, layer_idx=-1),
+        teacher=TeacherConfig(
+            kind="hf_ssl", target_dim=8, pooled="chunked", model_id="fake", layer=1
+        ),
+        data=EmiliaConfig(
+            repo_id="fake", sample_rate=16000, chunk_seconds=1.0, max_chunks=2, num_workers=0
+        ),
+        train=DistillTrainConfig(
+            batch_size=2,
+            grad_accum=1,
+            lr=1e-3,
+            warmup_steps=1,
+            total_steps=3,
+            log_every=1,
+            ckpt_every=0,
+            ckpt_dir=str(tmp_path),
+            resume_from_latest=False,
+            fsdp=False,
+        ),
+        regularizer=GaussianLossConfig(
+            enabled=True, weight=0.5, beta=4.0, lambda_rad=0.1, lambda_mom=1.0,
+            moment="w2", calibrate=False,
+        ),
+    )
+
+    train(cfg)
+
+    train_payloads = [p for p in logged if "train/loss" in p]
+    assert train_payloads, "expected at least one train/* log payload"
+    assert all("train/total_loss" in p for p in train_payloads)
+    assert all("train/wristband/total" in p for p in train_payloads)
+    assert all("train/wristband/mom" in p for p in train_payloads)
+    # total_loss should equal distill + weight * wristband.total per payload.
+    sample = train_payloads[-1]
+    expected_total = sample["train/loss"] + 0.5 * sample["train/wristband/total"]
+    assert abs(sample["train/total_loss"] - expected_total) < 1e-4

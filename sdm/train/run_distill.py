@@ -20,6 +20,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from sdm.dotenv import load_dotenv
+from sdm.losses.wristband_gaussian import GaussianLossConfig, WristbandGaussianLoss
 from sdm.modeling.distill_model import BackboneConfig, build_backbone
 from sdm.train import io as ckpt_io
 from sdm.train import preempt, wandb_utils, xla_utils
@@ -54,6 +55,9 @@ class TeacherConfig:
     # (pyworld_f0, g2p_speaking_rate). out -> (out - mean) / scale.
     target_mean: float | None = None
     target_scale: float | None = None
+    # Allosaurus speaking-rate extras (audio-based per-chunk teacher).
+    allosaurus_model: str | None = None
+    emit: float | None = None
 
 
 @dataclass
@@ -80,6 +84,10 @@ class DistillTrainConfig:
     total_steps: int = 30000
     log_every: int = 50
     ckpt_every: int = 5000
+    # Held-out eval cadence in optimizer steps. <=0 disables in-loop eval.
+    eval_every: int = 0
+    # Number of held-out utterances to draw at startup (separate stream seed).
+    eval_utterances: int = 64
     ckpt_dir: str | None = None
     resume_from_latest: bool = True
     fsdp: bool = True
@@ -94,6 +102,9 @@ class DistillConfig:
     teacher: TeacherConfig
     data: EmiliaConfig
     train: DistillTrainConfig
+    # Optional Gaussian-wristband regularizer applied to the pre-head
+    # pooled encoder output. Disabled by default (no-op for old runs).
+    regularizer: GaussianLossConfig = field(default_factory=GaussianLossConfig)
 
 
 def load_config(path: str | Path) -> DistillConfig:
@@ -101,12 +112,14 @@ def load_config(path: str | Path) -> DistillConfig:
     train = dict(raw["train"])
     if "wandb" in train:
         train["wandb"] = wandb_utils.WandbConfig(**train["wandb"])
+    reg_block = raw.get("regularizer") or {}
     return DistillConfig(
         experiment=raw["experiment"],
         backbone=BackboneConfig(**raw["backbone"]),
         teacher=TeacherConfig(**raw["teacher"]),
         data=EmiliaConfig(**raw["data"]),
         train=DistillTrainConfig(**train),
+        regularizer=GaussianLossConfig(**reg_block),
     )
 
 
@@ -296,6 +309,176 @@ def _stats_for_debug(name: str, tensor: torch.Tensor) -> str:
     )
 
 
+def _distill_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    chunk_mask: torch.Tensor,
+    loss_kind: str,
+) -> torch.Tensor:
+    """Dispatch the per-teacher distillation loss without grad_accum scaling.
+
+    Centralised so the held-out eval path uses exactly the same arithmetic
+    as the training step (just without the 1/grad_accum divide).
+    """
+    if loss_kind == "cos_l1":
+        return _masked_cos_l1(pred, target, chunk_mask)
+    if loss_kind == "cos":
+        return _masked_cos(pred, target, chunk_mask)
+    if loss_kind == "l1":
+        return _masked_l1(pred, target, chunk_mask)
+    if loss_kind == "mse":
+        return _masked_mse(pred, target, chunk_mask)
+    raise ValueError(f"unknown teacher.loss={loss_kind!r}")
+
+
+def _wristband_term(
+    encoded: torch.Tensor,
+    chunk_mask: torch.Tensor,
+    loss_fn: WristbandGaussianLoss,
+):
+    """Apply the wristband loss to flattened valid pre-head latents.
+
+    ``encoded`` is ``(B, N, D)``; we gather rows where ``chunk_mask`` is
+    true and pass them as ``(1, n_valid, D)`` so the loss treats the whole
+    batch's valid chunks as a single Gaussian sample. Returns ``None``
+    when fewer than 2 valid rows are available (the loss requires N>=2
+    for pairwise/covariance terms).
+    """
+    mask = chunk_mask.to(torch.bool)
+    if int(mask.sum()) < 2:
+        return None
+    latents = encoded[mask].to(torch.float32).unsqueeze(0)
+    return loss_fn(latents)
+
+
+def _build_held_out_batches(cfg: "DistillConfig") -> list[dict] | None:
+    """Pull a fixed held-out batch list from a separate-seed Emilia stream.
+
+    Run once at startup on the master process. We deliberately use a
+    different stream seed (``cfg.data.seed + 100003``) so the held-out
+    utterances do not collide with the training stream's prefix; the
+    Emilia corpus is large enough that this is effectively a disjoint
+    sample at the 10% fraction we use.
+
+    Tensors are kept on CPU; the eval loop moves each batch to ``device``
+    on demand to avoid pinning GPU memory across the run.
+    """
+    if cfg.train.eval_every <= 0 or cfg.train.eval_utterances <= 0:
+        return None
+    from sdm.data.streaming_emilia import StreamingEmiliaDataset, make_collate
+
+    stream_cfg = _to_streaming_emilia_cfg(cfg.data)
+    stream_cfg.seed = int(cfg.data.seed) + 100003
+    ds = StreamingEmiliaDataset(stream_cfg)
+    teacher_id = (
+        cfg.teacher.model_id
+        if cfg.teacher.kind in {"hf_ssl", "hf_ctc"}
+        else None
+    )
+    student_id = (
+        cfg.backbone.model_id
+        if cfg.backbone.kind in {"hf", "fairseq_w2v2"}
+        else None
+    )
+    collate_fn = make_collate(
+        teacher_processor_id=teacher_id,
+        student_processor_id=student_id,
+        sample_rate=cfg.data.sample_rate,
+    )
+    loader = DataLoader(
+        ds,
+        batch_size=cfg.train.batch_size,
+        collate_fn=collate_fn,
+        num_workers=0,
+    )
+    n_target = int(cfg.train.eval_utterances)
+    seen = 0
+    batches: list[dict] = []
+    for batch in loader:
+        cpu_batch = {
+            k: (v.detach().cpu() if torch.is_tensor(v) else v)
+            for k, v in batch.items()
+        }
+        batches.append(cpu_batch)
+        seen += int(cpu_batch["audio"].shape[0])
+        if seen >= n_target:
+            break
+    return batches or None
+
+
+@torch.no_grad()
+def _run_held_out_eval(
+    student: nn.Module,
+    teacher: nn.Module,
+    batches: list[dict],
+    *,
+    loss_kind: str,
+    device: torch.device,
+    wristband: WristbandGaussianLoss | None,
+) -> dict[str, float]:
+    """Run distill loss (and optional wristband) on the held-out batches.
+
+    Returns a dict ready for ``wandb_utils.log``. ``eval/loss`` is the
+    bare distillation loss -- the same metric the pre-wristband runs
+    logged as ``train/loss`` -- so wristband-on / wristband-off runs can
+    be compared directly without re-running the old experiments.
+    """
+    student_was_training = student.training
+    student.eval()
+    distill_sum = 0.0
+    distill_w = 0.0
+    rep_total_sum = 0.0
+    rep_rep_sum = 0.0
+    rep_rad_sum = 0.0
+    rep_mom_sum = 0.0
+    rep_w = 0.0
+    try:
+        for batch in batches:
+            chunk_mask = batch["chunk_mask"].to(device, non_blocking=True)
+            teacher_audio = batch.get("teacher_audio", batch["audio"]).to(
+                device, non_blocking=True
+            )
+            student_audio = batch.get("student_audio", batch["audio"]).to(
+                device, non_blocking=True
+            )
+            teacher_ctx = {
+                "texts": batch.get("texts"),
+                "languages": batch.get("languages"),
+                "n_chunks": batch.get("n_chunks"),
+            }
+            target = teacher(teacher_audio, chunk_mask=chunk_mask, **teacher_ctx)
+            encoded = student.encode(student_audio)
+            pred = student.head(encoded) if student.head is not None else encoded
+            loss = _distill_loss(pred, target, chunk_mask, loss_kind)
+            n_valid = float(chunk_mask.sum().detach().cpu())
+            distill_sum += float(loss.detach().cpu()) * n_valid
+            distill_w += n_valid
+            if wristband is not None:
+                comp = _wristband_term(encoded, chunk_mask, wristband)
+                if comp is not None:
+                    rep_total_sum += float(comp.total.detach().cpu()) * n_valid
+                    rep_rep_sum += float(comp.rep.detach().cpu()) * n_valid
+                    rep_rad_sum += float(comp.rad.detach().cpu()) * n_valid
+                    rep_mom_sum += float(comp.mom.detach().cpu()) * n_valid
+                    rep_w += n_valid
+    finally:
+        if student_was_training:
+            student.train()
+
+    if distill_w == 0:
+        return {}
+    out = {
+        "eval/loss": distill_sum / distill_w,
+        "eval/n_valid_chunks": distill_w,
+    }
+    if rep_w > 0:
+        out["eval/wristband/total"] = rep_total_sum / rep_w
+        out["eval/wristband/rep"] = rep_rep_sum / rep_w
+        out["eval/wristband/rad"] = rep_rad_sum / rep_w
+        out["eval/wristband/mom"] = rep_mom_sum / rep_w
+    return out
+
+
 def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
     torch.manual_seed(cfg.train.seed)
     device = xla_utils.get_device(
@@ -342,6 +525,39 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
         },
     ]
     optim = torch.optim.AdamW(params, lr=cfg.train.lr, betas=(0.9, 0.98), eps=1e-6)
+
+    # Wristband regularizer (no-op when ``cfg.regularizer.enabled`` is False).
+    # We deliberately skip the loss's built-in calibrator: chunk counts vary
+    # per batch (1..32 valid chunks), so a fixed calibration_shape would
+    # raise. With calibrate=False the per-component (mean=0, std=1) defaults
+    # in ``WristbandGaussianLoss`` reduce to identity normalisation and the
+    # raw component values are used directly.
+    wristband: WristbandGaussianLoss | None = None
+    if cfg.regularizer.enabled:
+        wristband = WristbandGaussianLoss(
+            beta=cfg.regularizer.beta,
+            lambda_rad=cfg.regularizer.lambda_rad,
+            lambda_mom=cfg.regularizer.lambda_mom,
+            moment=cfg.regularizer.moment,
+            calibration_shape=None,
+        )
+        if xla_utils.is_master():
+            print(
+                f"[wristband] enabled weight={cfg.regularizer.weight} "
+                f"beta={cfg.regularizer.beta} lambda_rad={cfg.regularizer.lambda_rad} "
+                f"lambda_mom={cfg.regularizer.lambda_mom} moment={cfg.regularizer.moment!r}"
+            )
+
+    held_out_batches: list[dict] | None = None
+    if cfg.train.eval_every > 0 and xla_utils.is_master():
+        t0 = time.perf_counter()
+        held_out_batches = _build_held_out_batches(cfg)
+        if held_out_batches is not None:
+            n_utts = sum(int(b["audio"].shape[0]) for b in held_out_batches)
+            print(
+                f"[eval] held-out: {n_utts} utterances in {len(held_out_batches)} batches "
+                f"(built in {time.perf_counter()-t0:.1f}s, eval_every={cfg.train.eval_every})"
+            )
 
     start_step = 0
     if cfg.train.ckpt_dir and cfg.train.resume_from_latest:
@@ -411,25 +627,46 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             t0 = time.perf_counter()
 
         pred = student(student_audio)
+        # Pre-head encoder output for the wristband regularizer. We only
+        # need this when the regularizer is on; the second `encode` call is
+        # cheap relative to the head/forward and shares no state with the
+        # earlier `student(student_audio)` (which runs encode+head fused
+        # via `forward`). Re-using the encoded tensor would require
+        # refactoring the call to be `encode -> head` everywhere; we keep
+        # the existing `student(student_audio)` for back-compat with the
+        # verbose stats path and only do the second pass when needed.
+        encoded: torch.Tensor | None = None
+        if wristband is not None:
+            encoded = student.encode(student_audio)
         loss_kind = cfg.teacher.loss
         if loss_kind == "cos_l1":
             if verbose and xla_utils.is_master():
                 loss_terms = _masked_cos_l1_terms(pred, target, chunk_mask)
-                loss = loss_terms["loss"] / cfg.train.grad_accum
+                distill = loss_terms["loss"]
             else:
                 loss_terms = None
-                loss = _masked_cos_l1(pred, target, chunk_mask) / cfg.train.grad_accum
+                distill = _masked_cos_l1(pred, target, chunk_mask)
         elif loss_kind == "cos":
             loss_terms = None
-            loss = _masked_cos(pred, target, chunk_mask) / cfg.train.grad_accum
+            distill = _masked_cos(pred, target, chunk_mask)
         elif loss_kind == "l1":
             loss_terms = None
-            loss = _masked_l1(pred, target, chunk_mask) / cfg.train.grad_accum
+            distill = _masked_l1(pred, target, chunk_mask)
         elif loss_kind == "mse":
             loss_terms = None
-            loss = _masked_mse(pred, target, chunk_mask) / cfg.train.grad_accum
+            distill = _masked_mse(pred, target, chunk_mask)
         else:
             raise ValueError(f"unknown teacher.loss={loss_kind!r}")
+
+        wristband_comp = None
+        if wristband is not None and encoded is not None:
+            wristband_comp = _wristband_term(encoded, chunk_mask, wristband)
+
+        if wristband_comp is not None:
+            total_loss = distill + cfg.regularizer.weight * wristband_comp.total
+        else:
+            total_loss = distill
+        loss = total_loss / cfg.train.grad_accum
         loss.backward()
         if verbose and xla_utils.is_master():
             xla_utils.mark_step()
@@ -475,7 +712,13 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             )
 
         if step % cfg.train.log_every == 0 and xla_utils.is_master():
-            loss_val = float(loss.detach()) * cfg.train.grad_accum
+            # ``train/loss`` mirrors the pre-wristband definition (the bare
+            # distillation loss) so wristband-on / wristband-off W&B runs
+            # are directly overlay-able. ``train/total_loss`` is the
+            # actual quantity backprop'd; identical when the regularizer is
+            # disabled.
+            distill_val = float(distill.detach())
+            total_val = float(total_loss.detach())
             if verbose and loss_terms is not None:
                 print(f"[verbose] step {step} tensor diagnostics:")
                 print("[verbose] " + _stats_for_debug("audio", audio))
@@ -499,13 +742,58 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
                         f"[verbose] grad_norm={gn:.4g} finite={math.isfinite(gn)} "
                         f"skipped_step={skipped_step}"
                     )
+            wristband_str = ""
+            if wristband_comp is not None:
+                wristband_str = (
+                    f"  wristband {float(wristband_comp.total.detach()):.4f}"
+                    f" total {total_val:.4f}"
+                )
             print(
-                f"step {step:>6d}  loss {loss_val:.4f}  lr {optim.param_groups[0]['lr']:.2e}"
+                f"step {step:>6d}  loss {distill_val:.4f}{wristband_str}  "
+                f"lr {optim.param_groups[0]['lr']:.2e}"
             )
-            wandb_utils.log(
-                {"train/loss": loss_val, "train/lr": optim.param_groups[0]["lr"]},
-                step=step,
+            log_payload: dict[str, float] = {
+                "train/loss": distill_val,
+                "train/total_loss": total_val,
+                "train/lr": optim.param_groups[0]["lr"],
+            }
+            if wristband_comp is not None:
+                log_payload["train/wristband/total"] = float(wristband_comp.total.detach())
+                log_payload["train/wristband/rep"] = float(wristband_comp.rep.detach())
+                log_payload["train/wristband/rad"] = float(wristband_comp.rad.detach())
+                log_payload["train/wristband/mom"] = float(wristband_comp.mom.detach())
+            wandb_utils.log(log_payload, step=step)
+
+        # Held-out eval (master-only). Runs after the optimizer step on the
+        # current `step`; reports both the bare distill loss (for direct
+        # comparison with pre-wristband baselines) and the wristband
+        # components when enabled.
+        eval_due = (
+            held_out_batches is not None
+            and cfg.train.eval_every > 0
+            and step > 0
+            and step % cfg.train.eval_every == 0
+            and xla_utils.is_master()
+        )
+        if eval_due:
+            t0 = time.perf_counter()
+            eval_metrics = _run_held_out_eval(
+                student,
+                teacher,
+                held_out_batches,
+                loss_kind=loss_kind,
+                device=device,
+                wristband=wristband,
             )
+            if eval_metrics:
+                eval_str = " ".join(
+                    f"{k.split('/')[-1]}={v:.4f}" for k, v in eval_metrics.items()
+                )
+                print(
+                    f"[eval] step {step:>6d}  {eval_str}  "
+                    f"({time.perf_counter()-t0:.1f}s)"
+                )
+                wandb_utils.log(eval_metrics, step=step)
 
         ckpt_due = (
             cfg.train.ckpt_dir

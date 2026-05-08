@@ -1,0 +1,62 @@
+# Probe matrix summary
+
+## ridge
+
+| backbone | best layer | R²_test |
+|---|---:|---:|
+| sdm-xlsr-fairseq | 24 | +0.386 |
+| sdm-dvector | 1 | +0.615 |
+| sdm-mpm | 24 | +0.516 |
+| sdm-pitch | 1 | +0.831 |
+| sdm-speaking-rate | 24 | +0.206 |
+| sdm-mwhisper | 24 | +0.266 |
+| sdm-w2v2-asr | 24 | +0.437 |
+| sdm-emotion2vec | 24 | +0.205 |
+
+Top 5 cross-teacher:
+       sdm-emotion2vec → sdm-pitch             R²=+0.836  L24
+      sdm-xlsr-fairseq → sdm-pitch             R²=+0.833  L24
+          sdm-w2v2-asr → sdm-pitch             R²=+0.831  L1
+          sdm-mwhisper → sdm-pitch             R²=+0.831  L1
+               sdm-mpm → sdm-pitch             R²=+0.831  L1
+
+Factor block:
+tf               Generic  Speaker  Prosody  Intelligibility  Emotion
+sf                                                                  
+Generic            0.386    0.615    0.522            0.357    0.210
+Speaker            0.349    0.615    0.515            0.328    0.191
+Prosody            0.356    0.615    0.516            0.333    0.194
+Intelligibility    0.378    0.615    0.520            0.352    0.206
+Emotion            0.378    0.615    0.521            0.352    0.205
+
+
+## mlp
+
+| backbone | best layer | R²_test |
+|---|---:|---:|
+| sdm-xlsr-fairseq | 12 | +0.443 |
+| sdm-dvector | 2 | +0.634 |
+| sdm-mpm | 2 | +0.528 |
+| sdm-pitch | 1 | +0.859 |
+| sdm-speaking-rate | 24 | +0.220 |
+| sdm-mwhisper | 11 | +0.256 |
+| sdm-w2v2-asr | 16 | +0.488 |
+| sdm-emotion2vec | 16 | +0.219 |
+
+Top 5 cross-teacher:
+           sdm-dvector → sdm-pitch             R²=+0.873  L2
+               sdm-mpm → sdm-pitch             R²=+0.866  L2
+          sdm-mwhisper → sdm-pitch             R²=+0.865  L2
+      sdm-xlsr-fairseq → sdm-pitch             R²=+0.865  L2
+          sdm-w2v2-asr → sdm-pitch             R²=+0.858  L2
+
+Factor block:
+tf               Generic  Speaker  Prosody  Intelligibility  Emotion
+sf                                                                  
+Generic            0.443    0.631    0.535            0.371    0.224
+Speaker            0.432    0.634    0.540            0.371    0.226
+Prosody            0.442    0.629    0.532            0.370    0.225
+Intelligibility    0.437    0.632    0.533            0.371    0.226
+Emotion            0.435    0.633    0.527            0.366    0.219
+
+

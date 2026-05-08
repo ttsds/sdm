@@ -1,0 +1,2 @@
+experiment,teacher_kind,loss_kind,target_dim,trained_layer,n_eval,n_dropped,target_var,target_constant,loss,r2,mean_abs_err,cosine_mean,load_s,eval_s
+sdm-xlsr-fairseq,hf_ssl,cos_l1,768,-1,87,0,0.2717144787311554,False,0.19770225882530212,0.21301697194576263,0.3058345913887024,0.9104301333427429,11.27,79.24
