@@ -53,24 +53,30 @@ row_for() {
 create_one() {
     local row="$1"
     IFS='|' read -r name cfg accel zone runtime <<<"$row"
-    # Skip if VM already exists.
-    if gcloud compute tpus tpu-vm describe "$name" --project="$PROJECT" --zone="$zone" \
-            --format="value(name)" >/dev/null 2>&1; then
-        echo "[create] $name: already exists, skipping"
-        return 0
-    fi
     mkdir -p .tpu-logs
     local log=".tpu-logs/${name}.create.log"
     local err=".tpu-logs/${name}.create.err"
-    # Retry-until-stockout-clears loop. Each `tpu-vm create --spot` call blocks
-    # ~15 min before failing on RESOURCE_EXHAUSTED; we just keep retrying. The
-    # caller backgrounds this so all VMs poll in parallel.
+    # Retry-until-stockout-clears loop. Some zones (notably v4 in
+    # us-central2-b) hang the synchronous `tpu-vm create` for tens of
+    # minutes before returning a stockout error, so we wrap each attempt
+    # in a hard timeout and let the loop cycle promptly. If a previous
+    # attempt's request actually succeeded server-side after we timed
+    # out, the existence check at the top of each iteration catches it.
     local RETRY_RE='no more capacity|Insufficient capacity|RESOURCE_EXHAUSTED|UNAVAILABLE|resourceExhausted|Stockout|currently unavailable|"code": 8|"code": 10|HttpError|503|504|deadline exceeded|Internal error'
+    local ATTEMPT_TIMEOUT="${SDM_TPU_ATTEMPT_TIMEOUT:-300}"  # seconds
     local attempt=0
     while true; do
+        # Skip-if-exists, re-checked every iteration in case a prior
+        # timed-out request created the VM in the background.
+        if gcloud compute tpus tpu-vm describe "$name" \
+                --project="$PROJECT" --zone="$zone" \
+                --format="value(name)" >/dev/null 2>&1; then
+            echo "[$(date -Iseconds)] [$name] already exists, skipping create" | tee -a "$log"
+            return 0
+        fi
         attempt=$((attempt + 1))
-        echo "[$(date -Iseconds)] [$name] attempt $attempt" | tee -a "$log"
-        if gcloud compute tpus tpu-vm create "$name" \
+        echo "[$(date -Iseconds)] [$name] attempt $attempt (timeout=${ATTEMPT_TIMEOUT}s)" | tee -a "$log"
+        if timeout "$ATTEMPT_TIMEOUT" gcloud compute tpus tpu-vm create "$name" \
                 --project="$PROJECT" \
                 --zone="$zone" \
                 --accelerator-type="$accel" \
@@ -79,8 +85,11 @@ create_one() {
             echo "[$(date -Iseconds)] [$name] CREATED after $attempt attempts" | tee -a "$log"
             return 0
         fi
+        rc=$?
         tail -3 "$err" | tee -a "$log" >/dev/null
-        if grep -aqE "$RETRY_RE" "$err" 2>/dev/null; then
+        if (( rc == 124 )); then
+            echo "[$name] attempt timed out after ${ATTEMPT_TIMEOUT}s; will re-check existence and retry" >> "$log"
+        elif grep -aqE "$RETRY_RE" "$err" 2>/dev/null; then
             echo "[$name] retryable error, retrying immediately" >> "$log"
         else
             echo "[$name] unknown error (retrying anyway):" >> "$log"
