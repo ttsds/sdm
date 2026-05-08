@@ -81,12 +81,11 @@ create_one() {
         fi
         tail -3 "$err" | tee -a "$log" >/dev/null
         if grep -aqE "$RETRY_RE" "$err" 2>/dev/null; then
-            echo "[$name] retryable error, sleeping 60s" >> "$log"
+            echo "[$name] retryable error, retrying immediately" >> "$log"
         else
             echo "[$name] unknown error (retrying anyway):" >> "$log"
             cat "$err" >> "$log"
         fi
-        sleep 60
     done
 }
 
