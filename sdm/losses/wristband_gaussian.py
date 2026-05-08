@@ -38,7 +38,9 @@ class GaussianLossConfig:
     beta: float = 8.0
     lambda_rad: float = 0.1
     lambda_mom: float = 1.0
-    moment: str = "w2"
+    # moment="w2" requires torch.linalg.eigvalsh which hangs XLA compilation
+    # for hours on TPU (Jacobi rotation lowering); use "kl_diag" by default.
+    moment: str = "kl_diag"
     calibrate: bool = True  # disable if batch shape varies a lot
 
 

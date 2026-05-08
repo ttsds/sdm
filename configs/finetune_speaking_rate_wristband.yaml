@@ -70,5 +70,5 @@ regularizer:
   beta: 8.0
   lambda_rad: 0.1
   lambda_mom: 1.0
-  moment: w2
+  moment: kl_diag
   calibrate: false
