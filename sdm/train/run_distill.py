@@ -447,13 +447,16 @@ def _run_held_out_eval(
                 "n_chunks": batch.get("n_chunks"),
             }
             target = teacher(teacher_audio, chunk_mask=chunk_mask, **teacher_ctx)
-            encoded = student.encode(student_audio)
-            pred = student.head(encoded) if student.head is not None else encoded
+            if wristband is not None:
+                pred, encoded = student(student_audio, return_encoded=True)
+            else:
+                pred = student(student_audio)
+                encoded = None
             loss = _distill_loss(pred, target, chunk_mask, loss_kind)
             n_valid = float(chunk_mask.sum().detach().cpu())
             distill_sum += float(loss.detach().cpu()) * n_valid
             distill_w += n_valid
-            if wristband is not None:
+            if wristband is not None and encoded is not None:
                 comp = _wristband_term(encoded, chunk_mask, wristband)
                 if comp is not None:
                     rep_total_sum += float(comp.total.detach().cpu()) * n_valid
@@ -626,18 +629,17 @@ def train(cfg: DistillConfig, *, verbose: bool = False) -> None:
             t_teacher = time.perf_counter() - t0
             t0 = time.perf_counter()
 
-        pred = student(student_audio)
-        # Pre-head encoder output for the wristband regularizer. We only
-        # need this when the regularizer is on; the second `encode` call is
-        # cheap relative to the head/forward and shares no state with the
-        # earlier `student(student_audio)` (which runs encode+head fused
-        # via `forward`). Re-using the encoded tensor would require
-        # refactoring the call to be `encode -> head` everywhere; we keep
-        # the existing `student(student_audio)` for back-compat with the
-        # verbose stats path and only do the second pass when needed.
+        # Single backbone forward. When the regularizer is on we ask the
+        # student to return both the head output and the pooled encoder
+        # output, so FSDP only all-gathers parameters once. (Calling
+        # ``student.encode`` separately under FSDP would require a second
+        # full forward to re-trace, doubling the compute on the entire
+        # backbone.)
         encoded: torch.Tensor | None = None
         if wristband is not None:
-            encoded = student.encode(student_audio)
+            pred, encoded = student(student_audio, return_encoded=True)
+        else:
+            pred = student(student_audio)
         loss_kind = cfg.teacher.loss
         if loss_kind == "cos_l1":
             if verbose and xla_utils.is_master():

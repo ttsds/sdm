@@ -207,11 +207,13 @@ class DistillModel(nn.Module):
         *,
         layer: int | None = None,
         attention_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+        return_encoded: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         encoded = self.encode(audio, layer=layer, attention_mask=attention_mask)
-        if self.head is None:
-            return encoded
-        return self.head(encoded)
+        pred = encoded if self.head is None else self.head(encoded)
+        if return_encoded:
+            return pred, encoded
+        return pred
 
 
 def _strip_pos_conv_weight_norm(backbone: nn.Module) -> None:
