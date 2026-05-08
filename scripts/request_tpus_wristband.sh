@@ -252,6 +252,23 @@ case "${1:-}" in
             --create) create_one "$row" ;;
             --launch) launch_one "$row" ;;
             --delete) delete_one "$row" ;;
+            --detached)
+                mkdir -p .tpu-logs
+                pidfile=".tpu-logs/${1}.create.pid"
+                if [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+                    echo "[detach] $1: already polling (pid $(cat "$pidfile"))"
+                    exit 0
+                fi
+                nohup bash -c "
+                    $(declare -f create_one)
+                    $(declare -f launch_one)
+                    $(declare -f create_and_launch_one)
+                    PROJECT='$PROJECT'
+                    create_and_launch_one '$row'
+                " >/dev/null 2>&1 &
+                echo $! > "$pidfile"
+                echo "[detach] $1: pid $(cat "$pidfile") (logs .tpu-logs/${1}.{create,launch}.log)"
+                ;;
             *) echo "Unknown sub $sub" >&2; exit 2 ;;
         esac
         ;;
