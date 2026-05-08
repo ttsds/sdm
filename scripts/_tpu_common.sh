@@ -82,6 +82,8 @@ uv run python -c "import torch, torch_xla; print('[bootstrap] torch', torch.__ve
 #   - funasr:                 emotion2vec (AutoModel wrapper -- canonical
 #                             loader maintained by the model authors)
 #   - masked_prosody_model:   mpm (git, no PyPI release)
+#   - allosaurus:             allosaurus_speaking_rate (per-chunk syllable
+#                             counts via IPA phone timestamps)
 # transformers / huggingface-hub / soundfile / librosa are already in core.
 if ! dpkg -s espeak-ng >/dev/null 2>&1; then
     sudo apt-get update -y && sudo apt-get install -y espeak-ng libespeak-ng1
@@ -92,6 +94,7 @@ uv pip install \
     wespeaker-unofficial \
     onnxruntime \
     funasr \
+    allosaurus \
     'masked_prosody_model @ git+https://github.com/MiniXC/masked_prosody_model'
 
 # 6. XLA + wandb env
