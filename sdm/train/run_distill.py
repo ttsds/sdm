@@ -432,41 +432,39 @@ def _run_held_out_eval(
     rep_rad_sum = 0.0
     rep_mom_sum = 0.0
     rep_w = 0.0
-    try:
-        for batch in batches:
-            chunk_mask = batch["chunk_mask"].to(device, non_blocking=True)
-            teacher_audio = batch.get("teacher_audio", batch["audio"]).to(
-                device, non_blocking=True
-            )
-            student_audio = batch.get("student_audio", batch["audio"]).to(
-                device, non_blocking=True
-            )
-            teacher_ctx = {
-                "texts": batch.get("texts"),
-                "languages": batch.get("languages"),
-                "n_chunks": batch.get("n_chunks"),
-            }
-            target = teacher(teacher_audio, chunk_mask=chunk_mask, **teacher_ctx)
-            if wristband is not None:
-                pred, encoded = student(student_audio, return_encoded=True)
-            else:
-                pred = student(student_audio)
-                encoded = None
-            loss = _distill_loss(pred, target, chunk_mask, loss_kind)
-            n_valid = float(chunk_mask.sum().detach().cpu())
-            distill_sum += float(loss.detach().cpu()) * n_valid
-            distill_w += n_valid
-            if wristband is not None and encoded is not None:
-                comp = _wristband_term(encoded, chunk_mask, wristband)
-                if comp is not None:
-                    rep_total_sum += float(comp.total.detach().cpu()) * n_valid
-                    rep_rep_sum += float(comp.rep.detach().cpu()) * n_valid
-                    rep_rad_sum += float(comp.rad.detach().cpu()) * n_valid
-                    rep_mom_sum += float(comp.mom.detach().cpu()) * n_valid
-                    rep_w += n_valid
-    finally:
-        if student_was_training:
-            student.train()
+    for batch in batches:
+        chunk_mask = batch["chunk_mask"].to(device, non_blocking=True)
+        teacher_audio = batch.get("teacher_audio", batch["audio"]).to(
+            device, non_blocking=True
+        )
+        student_audio = batch.get("student_audio", batch["audio"]).to(
+            device, non_blocking=True
+        )
+        teacher_ctx = {
+            "texts": batch.get("texts"),
+            "languages": batch.get("languages"),
+            "n_chunks": batch.get("n_chunks"),
+        }
+        target = teacher(teacher_audio, chunk_mask=chunk_mask, **teacher_ctx)
+        if wristband is not None:
+            pred, encoded = student(student_audio, return_encoded=True)
+        else:
+            pred = student(student_audio)
+            encoded = None
+        loss = _distill_loss(pred, target, chunk_mask, loss_kind)
+        n_valid = float(chunk_mask.sum().detach().cpu())
+        distill_sum += float(loss.detach().cpu()) * n_valid
+        distill_w += n_valid
+        if wristband is not None and encoded is not None:
+            comp = _wristband_term(encoded, chunk_mask, wristband)
+            if comp is not None:
+                rep_total_sum += float(comp.total.detach().cpu()) * n_valid
+                rep_rep_sum += float(comp.rep.detach().cpu()) * n_valid
+                rep_rad_sum += float(comp.rad.detach().cpu()) * n_valid
+                rep_mom_sum += float(comp.mom.detach().cpu()) * n_valid
+                rep_w += n_valid
+    if student_was_training:
+        student.train()
 
     if distill_w == 0:
         return {}
